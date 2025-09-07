@@ -1,0 +1,185 @@
+{
+  "blueprint_name": "BP_EnemyFollower",
+  "description": "An enemy AI character that continuously follows a target actor.",
+  "parent_class": "Character",
+  "variables": [
+    {
+      "name": "TargetActor",
+      "type": "Actor",
+      "default_value": null,
+      "category": "AI"
+    },
+    {
+      "name": "AcceptanceRadius",
+      "type": "Float",
+      "default_value": "100.0",
+      "category": "AI"
+    }
+  ],
+  "events": [
+    {
+      "name": "EventBeginPlay",
+      "inputs": [],
+      "logic": {
+        "nodes": [
+          {
+            "ID": "1",
+            "Type": "GetPlayerController",
+            "FunctionType": "BuiltIn",
+            "Inputs": {
+              "WorldContextObject": "Self",
+              "PlayerIndex": "0"
+            },
+            "Outputs": {
+              "ReturnValue": "PlayerController"
+            }
+          },
+          {
+            "ID": "2",
+            "Type": "GetControlledPawn",
+            "FunctionType": "BuiltIn",
+            "Inputs": {
+              "Controller": "PlayerController"
+            },
+            "Outputs": {
+              "ReturnValue": "Actor"
+            }
+          },
+          {
+            "ID": "3",
+            "Type": "SetVariable",
+            "FunctionType": "Custom",
+            "Inputs": {
+              "variable": "TargetActor",
+              "value": "Actor"
+            },
+            "Outputs": {}
+          }
+        ],
+        "connections": [
+          { "FromNode": "1", "FromPin": "ReturnValue", "ToNode": "2", "ToPin": "Controller" },
+          { "FromNode": "2", "FromPin": "ReturnValue", "ToNode": "3", "ToPin": "value" }
+        ]
+      }
+    }
+  ],
+  "functions": [
+    {
+      "name": "FollowTarget",
+      "inputs": [],
+      "outputs": [],
+      "nodes": [
+        {
+          "ID": "0",
+          "Type": "FunctionEntry",
+          "FunctionType": "Custom",
+          "Inputs": {},
+          "Outputs": {}
+        },
+        {
+          "ID": "4",
+          "Type": "GetVariable",
+          "FunctionType": "Custom",
+          "Inputs": {
+            "variable": "TargetActor"
+          },
+          "Outputs": {
+            "value": "Actor"
+          }
+        },
+        {
+          "ID": "5",
+          "Type": "GetActorLocation",
+          "FunctionType": "BuiltIn",
+          "Inputs": {
+            "Target": "TargetActor"
+          },
+          "Outputs": {
+            "ReturnValue": "Vector"
+          }
+        },
+        {
+          "ID": "6",
+          "Type": "GetActorLocation",
+          "FunctionType": "BuiltIn",
+          "Inputs": {
+            "Target": "Self"
+          },
+          "Outputs": {
+            "ReturnValue": "Vector"
+          }
+        },
+        {
+          "ID": "7",
+          "Type": "Subtract_VectorVector",
+          "FunctionType": "BuiltIn",
+          "Inputs": {
+            "A": "Vector",
+            "B": "Vector"
+          },
+          "Outputs": {
+            "ReturnValue": "Vector"
+          }
+        },
+        {
+          "ID": "8",
+          "Type": "Normalize",
+          "FunctionType": "BuiltIn",
+          "Inputs": {
+            "Vector": "Vector"
+          },
+          "Outputs": {
+            "ReturnValue": "Vector"
+          }
+        },
+        {
+          "ID": "9",
+          "Type": "AddMovementInput",
+          "FunctionType": "BuiltIn",
+          "Inputs": {
+            "WorldDirection": "Vector",
+            "ScaleValue": "1.0",
+            "bForce": "false"
+          },
+          "Outputs": {}
+        },
+        {
+          "ID": "10",
+          "Type": "ReturnNode",
+          "FunctionType": "Custom",
+          "Inputs": {},
+          "Outputs": {}
+        }
+      ],
+      "connections": [
+        { "FromNode": "0", "FromPin": "", "ToNode": "4", "ToPin": "" },
+        { "FromNode": "4", "FromPin": "value", "ToNode": "5", "ToPin": "Target" },
+        { "FromNode": "4", "FromPin": "value", "ToNode": "6", "ToPin": "Target" },
+        { "FromNode": "5", "FromPin": "ReturnValue", "ToNode": "7", "ToPin": "A" },
+        { "FromNode": "6", "FromPin": "ReturnValue", "ToNode": "7", "ToPin": "B" },
+        { "FromNode": "7", "FromPin": "ReturnValue", "ToNode": "8", "ToPin": "Vector" },
+        { "FromNode": "8", "FromPin": "ReturnValue", "ToNode": "9", "ToPin": "WorldDirection" },
+        { "FromNode": "9", "FromPin": "", "ToNode": "10", "ToPin": "" }
+      ]
+    }
+  ],
+  "execution_flow": [
+    {
+      "from_event": "Tick",
+      "sequence": [
+        "Call FollowTarget every frame to move towards TargetActor"
+      ]
+    }
+  ],
+  "components": [
+    {
+      "name": "MeshComponent",
+      "type": "SkeletalMeshComponent",
+      "attachment": "RootComponent",
+      "properties": {
+        "SkeletalMesh": "EnemyMesh",
+        "Material": "EnemyMaterial"
+      }
+    }
+  ]
+}

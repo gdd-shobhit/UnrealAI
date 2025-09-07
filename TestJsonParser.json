@@ -1,0 +1,166 @@
+{
+  "blueprint_name": "EnemyAI_Follower",
+  "description": "Enemy AI that continuously follows a target actor in the game world",
+  "parent_class": "Character",
+  "variables": [
+    {
+      "name": "TargetActor",
+      "type": "Actor",
+      "default_value": null,
+      "category": "AI"
+    },
+    {
+      "name": "AcceptanceRadius",
+      "type": "Float",
+      "default_value": "100.0",
+      "category": "AI"
+    }
+  ],
+  "events": [
+    {
+      "name": "Tick",
+      "inputs": [
+        {"name": "DeltaTime", "type": "Float"}
+      ],
+      "logic": "On every frame, update AI movement towards TargetActor"
+    }
+  ],
+  "functions": [
+    {
+      "name": "FollowTarget",
+      "inputs": [
+        {"name": "TargetActor", "type": "Actor"},
+        {"name": "AcceptanceRadius", "type": "Float"}
+      ],
+      "outputs": [],
+      "nodes": [
+        {
+          "ID": "0",
+          "Type": "FunctionEntry",
+          "Inputs": {},
+          "Outputs": {
+            "TargetActor": "TargetActor",
+            "AcceptanceRadius": "AcceptanceRadius"
+          }
+        },
+        {
+          "ID": "1",
+          "Type": "GetActorLocation",
+          "Inputs": {
+            "Target": "TargetActor"
+          },
+          "Outputs": {
+            "ReturnValue": "TargetLocation"
+          }
+        },
+        {
+          "ID": "2",
+          "Type": "GetActorLocation",
+          "Inputs": {
+            "Target": "Self"
+          },
+          "Outputs": {
+            "ReturnValue": "CurrentLocation"
+          }
+        },
+        {
+          "ID": "3",
+          "Type": "FindLookAtRotation",
+          "Inputs": {
+            "Start": "CurrentLocation",
+            "Target": "TargetLocation"
+          },
+          "Outputs": {
+            "ReturnValue": "DesiredRotation"
+          }
+        },
+        {
+          "ID": "4",
+          "Type": "SetActorRotation",
+          "Inputs": {
+            "Target": "Self",
+            "NewRotation": "DesiredRotation"
+          },
+          "Outputs": {}
+        },
+        {
+          "ID": "5",
+          "Type": "GetDistanceTo",
+          "Inputs": {
+            "Target": "TargetActor"
+          },
+          "Outputs": {
+            "ReturnValue": "DistanceToTarget"
+          }
+        },
+        {
+          "ID": "6",
+          "Type": "Branch",
+          "Inputs": {
+            "Condition": "DistanceToTarget < AcceptanceRadius"
+          },
+          "Outputs": {
+            "True": "DoNothing",
+            "False": "MoveToTarget"
+          }
+        },
+        {
+          "ID": "7",
+          "Type": "AddMovementInput",
+          "Inputs": {
+            "WorldDirection": "GetForwardVector(Self)",
+            "ScaleValue": "1.0",
+            "bForce": "false"
+          },
+          "Outputs": {}
+        },
+        {
+          "ID": "8",
+          "Type": "ReturnNode",
+          "Inputs": {},
+          "Outputs": {}
+        }
+      ],
+      "connections": [
+        {"FromNode": "0", "FromPin": "TargetActor", "ToNode": "1", "ToPin": "Target"},
+        {"FromNode": "0", "FromPin": "TargetActor", "ToNode": "5", "ToPin": "Target"},
+        {"FromNode": "1", "FromPin": "ReturnValue", "ToNode": "3", "ToPin": "Target"},
+        {"FromNode": "2", "FromPin": "ReturnValue", "ToNode": "3", "ToPin": "Start"},
+        {"FromNode": "3", "FromPin": "ReturnValue", "ToNode": "4", "ToPin": "NewRotation"},
+        {"FromNode": "5", "FromPin": "ReturnValue", "ToNode": "6", "ToPin": "Condition"},
+        {"FromNode": "6", "FromPin": "False", "ToNode": "7", "ToPin": ""},
+        {"FromNode": "4", "FromPin": "", "ToNode": "6", "ToPin": ""},
+        {"FromNode": "7", "FromPin": "", "ToNode": "8", "ToPin": ""},
+        {"FromNode": "6", "FromPin": "True", "ToNode": "8", "ToPin": ""}
+      ]
+    }
+  ],
+  "execution_flow": [
+    {
+      "from_event": "Tick",
+      "sequence": [
+        "Call FollowTarget with TargetActor and AcceptanceRadius"
+      ]
+    }
+  ],
+  "components": [
+    {
+      "name": "Mesh",
+      "type": "SkeletalMeshComponent",
+      "attachment": "RootComponent",
+      "properties": {
+        "SkeletalMesh": "DefaultEnemyMesh",
+        "Material": "DefaultMaterial"
+      }
+    },
+    {
+      "name": "CapsuleCollider",
+      "type": "CapsuleComponent",
+      "attachment": "RootComponent",
+      "properties": {
+        "CapsuleHalfHeight": "88.0",
+        "CapsuleRadius": "34.0"
+      }
+    }
+  ]
+}

@@ -1,0 +1,133 @@
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Engine/DeveloperSettings.h"
+#include "UnrealAIService.h"
+#include "UnrealAISettings.generated.h"
+
+UCLASS(config = Editor, defaultconfig, meta = (DisplayName = "UnrealAI Settings"))
+class UNREALAI_API UUnrealAISettings : public UDeveloperSettings
+{
+	GENERATED_BODY()
+
+public:
+	UUnrealAISettings();
+
+	// Local LLM Configuration
+	UPROPERTY(Config, EditAnywhere, Category = "Local LLM", meta = (DisplayName = "Enable Local LLM"))
+	bool bEnableLocalLLM = true;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Local LLM", meta = (DisplayName = "Local LLM Endpoint"))
+	FString LocalLLMEndpoint = TEXT("http://localhost:11434/api/generate");
+
+	UPROPERTY(Config, EditAnywhere, Category = "Local LLM", meta = (DisplayName = "Default Model"))
+	FString DefaultLocalModel = TEXT("llama2");
+
+	UPROPERTY(Config, EditAnywhere, Category = "Local LLM", meta = (DisplayName = "Request Timeout (seconds)"))
+	float LocalLLMTimeout = 30.0f;
+
+	// Claude API Configuration
+	UPROPERTY(Config, EditAnywhere, Category = "Claude API", meta = (DisplayName = "Enable Claude API"))
+	bool bEnableClaude = false;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Claude API", meta = (DisplayName = "Claude API Key", PasswordField = true))
+	FString ClaudeAPIKey;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Claude API", meta = (DisplayName = "Claude Model"))
+	FString ClaudeModel = TEXT("claude-3-sonnet-20240229");
+
+	UPROPERTY(Config, EditAnywhere, Category = "Claude API", meta = (DisplayName = "Request Timeout (seconds)"))
+	float ClaudeTimeout = 60.0f;
+
+	// OpenAI API Configuration
+	UPROPERTY(Config, EditAnywhere, Category = "OpenAI API", meta = (DisplayName = "Enable OpenAI API"))
+	bool bEnableOpenAI = false;
+
+	UPROPERTY(Config, EditAnywhere, Category = "OpenAI API", meta = (DisplayName = "OpenAI API Key", PasswordField = true))
+	FString OpenAIAPIKey;
+
+	UPROPERTY(Config, EditAnywhere, Category = "OpenAI API", meta = (DisplayName = "OpenAI Model"))
+	FString OpenAIModel = TEXT("gpt-4");
+
+	UPROPERTY(Config, EditAnywhere, Category = "OpenAI API", meta = (DisplayName = "Request Timeout (seconds)"))
+	float OpenAITimeout = 60.0f;
+
+	// General Settings
+	UPROPERTY(Config, EditAnywhere, Category = "General", meta = (DisplayName = "Default Temperature"))
+	float DefaultTemperature = 0.7f;
+
+	UPROPERTY(Config, EditAnywhere, Category = "General", meta = (DisplayName = "Default Max Tokens"))
+	int32 DefaultMaxTokens = 2048;
+
+	UPROPERTY(Config, EditAnywhere, Category = "General", meta = (DisplayName = "Preferred Provider"))
+	EAIProvider PreferredProvider = EAIProvider::LocalLLM;
+
+	UPROPERTY(Config, EditAnywhere, Category = "General", meta = (DisplayName = "Enable Debug Logging"))
+	bool bEnableDebugLogging = false;
+
+	UPROPERTY(Config, EditAnywhere, Category = "General", meta = (DisplayName = "Save API Keys in Project"))
+	bool bSaveAPIKeysInProject = false;
+
+	// Blueprint Generation Settings
+	UPROPERTY(Config, EditAnywhere, Category = "Blueprint Generation", meta = (DisplayName = "Include Best Practices"))
+	bool bIncludeBestPractices = true;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Blueprint Generation", meta = (DisplayName = "Include Performance Tips"))
+	bool bIncludePerformanceTips = true;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Blueprint Generation", meta = (DisplayName = "Include Comments"))
+	bool bIncludeComments = true;
+
+	// C++ Generation Settings
+	UPROPERTY(Config, EditAnywhere, Category = "C++ Generation", meta = (DisplayName = "Include Header Comments"))
+	bool bIncludeHeaderComments = true;
+
+	UPROPERTY(Config, EditAnywhere, Category = "C++ Generation", meta = (DisplayName = "Include Implementation Comments"))
+	bool bIncludeImplementationComments = true;
+
+	UPROPERTY(Config, EditAnywhere, Category = "C++ Generation", meta = (DisplayName = "Include Memory Management Tips"))
+	bool bIncludeMemoryManagementTips = true;
+
+	// Code Review Settings
+	UPROPERTY(Config, EditAnywhere, Category = "Code Review", meta = (DisplayName = "Include Security Analysis"))
+	bool bIncludeSecurityAnalysis = true;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Code Review", meta = (DisplayName = "Include Performance Analysis"))
+	bool bIncludePerformanceAnalysis = true;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Code Review", meta = (DisplayName = "Include Best Practices Review"))
+	bool bIncludeBestPracticesReview = true;
+
+	// Validation functions
+	UFUNCTION(BlueprintCallable, Category = "UnrealAI Settings")
+	bool ValidateLocalLLMConfiguration() const;
+
+	UFUNCTION(BlueprintCallable, Category = "UnrealAI Settings")
+	bool ValidateClaudeConfiguration() const;
+
+	UFUNCTION(BlueprintCallable, Category = "UnrealAI Settings")
+	bool ValidateOpenAIConfiguration() const;
+
+	// Getter functions
+	UFUNCTION(BlueprintPure, Category = "UnrealAI Settings")
+	FString GetLocalLLMEndpoint() const { return LocalLLMEndpoint; }
+
+	UFUNCTION(BlueprintPure, Category = "UnrealAI Settings")
+	FString GetClaudeAPIKey() const { return ClaudeAPIKey; }
+
+	UFUNCTION(BlueprintPure, Category = "UnrealAI Settings")
+	FString GetOpenAIAPIKey() const { return OpenAIAPIKey; }
+
+	UFUNCTION(BlueprintPure, Category = "UnrealAI Settings")
+	bool IsLocalLLMEnabled() const { return bEnableLocalLLM; }
+
+	UFUNCTION(BlueprintPure, Category = "UnrealAI Settings")
+	bool IsClaudeEnabled() const { return bEnableClaude && !ClaudeAPIKey.IsEmpty(); }
+
+	UFUNCTION(BlueprintPure, Category = "UnrealAI Settings")
+	bool IsOpenAIEnabled() const { return bEnableOpenAI && !OpenAIAPIKey.IsEmpty(); }
+
+	// Override from UDeveloperSettings
+	virtual FName GetCategoryName() const override;
+	virtual FText GetSectionText() const override;
+};

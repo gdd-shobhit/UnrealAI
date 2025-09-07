@@ -1,0 +1,449 @@
+{
+  "blueprint_name": "ExampleBlueprint",
+  "description": "Example description of what this blueprint does",
+  "parent_class": "Actor",
+  "variables": [
+    {
+      "variableID": "1",
+      "name": "ExampleVariable",
+      "type": "Float",
+      "default_value": "100.0",
+      "category": "Example",
+      "is_editable": true,
+      "is_blueprint_read_only": false,
+      "is_blueprint_read_write": true,
+      "is_private": false,
+      "meta_data": {
+        "tooltip": "Example tooltip",
+        "units": "units",
+        "clamp_min": 0.0,
+        "clamp_max": 1000.0
+      }
+    }
+  ],
+  "events": [
+    {
+      "eventID": "1",
+      "name": "BeginPlay",
+      "inputs": [],
+      "logic": "Example logic description"
+    },
+    {
+      "eventID": "2",
+      "name": "On Pick Up (TP_PickUp)",
+      "inputs": [
+        {
+          "name": "Pick Up Character",
+          "type": "Character",
+          "description": "Reference to the character that performed the pickup"
+        }
+      ],
+      "logic": "Event triggered when TP_PickUp object is interacted with"
+    }
+  ],
+  "functions": [
+    {
+      "functionID": "1",
+      "name": "ExampleFunction",
+      "inputs": [
+        {
+          "name": "ExampleInput",
+          "type": "Float",
+          "default_value": "10.0"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "ExampleOutput",
+          "type": "Boolean",
+          "default_value": "false"
+        }
+      ],
+      "logic": "Example function logic description"
+    },
+    {
+      "functionID": "2",
+      "name": "Attach Weapon",
+      "inputs": [
+        {
+          "name": "Target",
+          "type": "Actor",
+          "description": "The weapon to attach"
+        },
+        {
+          "name": "Target Character",
+          "type": "Character",
+          "description": "The character to attach the weapon to"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Return Value",
+          "type": "Boolean",
+          "description": "Whether the attachment was successful"
+        }
+      ],
+      "logic": "Attaches a weapon to the target character",
+      "tooltip": "Target is FPS Test Weapon Component!"
+    },
+    {
+      "functionID": "3",
+      "name": "Get Anim Instance",
+      "inputs": [
+        {
+          "name": "Target",
+          "type": "SkeletalMeshComponent",
+          "description": "The skeletal mesh component to get the animation instance from"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Return Value",
+          "type": "Object",
+          "description": "Reference to the animation instance"
+        }
+      ],
+      "logic": "Gets the animation instance from a skeletal mesh component",
+      "tooltip": "Target is Skeletal Mesh Component!"
+    }
+  ],
+  "nodes": [
+    {
+      "nodeID": "1",
+      "type": "Event",
+      "name": "On Pick Up (TP_PickUp)",
+      "position": {"x": 100, "y": 200},
+      "event_type": "Custom",
+      "pins": [
+        {
+          "pinID": "exec_out",
+          "type": "execution",
+          "direction": "output",
+          "connected_to": ["2"],
+          "description": "Execution flow to Attach Weapon"
+        },
+        {
+          "pinID": "pickup_character_out",
+          "type": "data",
+          "direction": "output",
+          "data_type": "Character",
+          "connected_to": ["2", "5"],
+          "description": "Pick Up Character reference"
+        }
+      ]
+    },
+    {
+      "nodeID": "2",
+      "type": "Variable",
+      "name": "TP Weapon",
+      "position": {"x": 150, "y": 150},
+      "variable_type": "Actor",
+      "pins": [
+        {
+          "pinID": "weapon_out",
+          "type": "data",
+          "direction": "output",
+          "data_type": "Actor",
+          "connected_to": ["3"],
+          "description": "Weapon reference"
+        }
+      ]
+    },
+    {
+      "nodeID": "3",
+      "type": "Function",
+      "name": "Attach Weapon",
+      "position": {"x": 300, "y": 200},
+      "function_reference": "2",
+      "pins": [
+        {
+          "pinID": "exec_in",
+          "type": "execution",
+          "direction": "input",
+          "connected_from": ["1"],
+          "description": "Execution from On Pick Up"
+        },
+        {
+          "pinID": "target_in",
+          "type": "data",
+          "direction": "input",
+          "data_type": "Actor",
+          "connected_from": ["2"],
+          "description": "Weapon target"
+        },
+        {
+          "pinID": "character_in",
+          "type": "data",
+          "direction": "input",
+          "data_type": "Character",
+          "connected_from": ["1"],
+          "description": "Target character"
+        },
+        {
+          "pinID": "exec_out",
+          "type": "execution",
+          "direction": "output",
+          "connected_to": ["4"],
+          "description": "Execution to Branch"
+        },
+        {
+          "pinID": "return_out",
+          "type": "data",
+          "direction": "output",
+          "data_type": "Boolean",
+          "connected_to": ["4"],
+          "description": "Attachment success result"
+        }
+      ]
+    },
+    {
+      "nodeID": "4",
+      "type": "Branch",
+      "name": "Branch",
+      "position": {"x": 500, "y": 200},
+      "pins": [
+        {
+          "pinID": "exec_in",
+          "type": "execution",
+          "direction": "input",
+          "connected_from": ["3"],
+          "description": "Execution from Attach Weapon"
+        },
+        {
+          "pinID": "condition_in",
+          "type": "data",
+          "direction": "input",
+          "data_type": "Boolean",
+          "connected_from": ["6"],
+          "description": "Condition from Attach Weapon return value"
+        },
+        {
+          "pinID": "true_out",
+          "type": "execution",
+          "direction": "output",
+          "connected_to": [""],
+          "description": "True execution path to Cast"
+        },
+        {
+          "pinID": "false_out",
+          "type": "execution",
+          "direction": "output",
+          "connected_to": [],
+          "description": "False execution path (unconnected)"
+        }
+      ]
+    },
+    {
+      "nodeID": "5",
+      "type": "Component",
+      "name": "Mesh 1P",
+      "position": {"x": 200, "y": 300},
+      "component_type": "SkeletalMeshComponent",
+      "pins": [
+        {
+          "pinID": "target_in",
+          "type": "data",
+          "direction": "input",
+          "data_type": "Character",
+          "connected_from": ["1"],
+          "description": "Character reference"
+        },
+        {
+          "pinID": "mesh_out",
+          "type": "data",
+          "direction": "output",
+          "data_type": "SkeletalMeshComponent",
+          "connected_to": ["6"],
+          "description": "Mesh component reference"
+        }
+      ]
+    },
+    {
+      "nodeID": "6",
+      "type": "Function",
+      "name": "Get Anim Instance",
+      "position": {"x": 400, "y": 300},
+      "function_reference": "3",
+      "pins": [
+        {
+          "pinID": "target_in",
+          "type": "data",
+          "direction": "input",
+          "data_type": "SkeletalMeshComponent",
+          "connected_from": ["5"],
+          "description": "Mesh component target"
+        },
+        {
+          "pinID": "anim_instance_out",
+          "type": "data",
+          "direction": "output",
+          "data_type": "Object",
+          "connected_to": ["7"],
+          "description": "Animation instance reference"
+        }
+      ]
+    },
+    {
+      "nodeID": "7",
+      "type": "Cast",
+      "name": "Cast To FirstPerson_AnimBP",
+      "position": {"x": 600, "y": 200},
+      "cast_type": "FirstPerson_AnimBP",
+      "pins": [
+        {
+          "pinID": "exec_in",
+          "type": "execution",
+          "direction": "input",
+          "connected_from": ["4"],
+          "description": "Execution from Branch True"
+        },
+        {
+          "pinID": "object_in",
+          "type": "data",
+          "direction": "input",
+          "data_type": "Object",
+          "connected_from": ["6"],
+          "description": "Object to cast"
+        },
+        {
+          "pinID": "exec_out",
+          "type": "execution",
+          "direction": "output",
+          "connected_to": ["8"],
+          "description": "Successful cast execution"
+        },
+        {
+          "pinID": "cast_failed_out",
+          "type": "execution",
+          "direction": "output",
+          "connected_to": [],
+          "description": "Cast failed execution (unconnected)"
+        },
+        {
+          "pinID": "cast_result_out",
+          "type": "data",
+          "direction": "output",
+          "data_type": "FirstPerson_AnimBP",
+          "connected_to": ["8"],
+          "description": "Successfully cast reference"
+        }
+      ]
+    },
+    {
+      "nodeID": "8",
+      "type": "SetVariable",
+      "name": "SET Has Rifle",
+      "position": {"x": 800, "y": 200},
+      "variable_name": "Has Rifle",
+      "variable_type": "Boolean",
+      "pins": [
+        {
+          "pinID": "exec_in",
+          "type": "execution",
+          "direction": "input",
+          "connected_from": ["7"],
+          "description": "Execution from successful cast"
+        },
+        {
+          "pinID": "target_in",
+          "type": "data",
+          "direction": "input",
+          "data_type": "FirstPerson_AnimBP",
+          "connected_from": ["7"],
+          "description": "Target animation blueprint"
+        },
+        {
+          "pinID": "value_in",
+          "type": "data",
+          "direction": "input",
+          "data_type": "Boolean",
+          "default_value": true,
+          "description": "Value to set (true)"
+        },
+        {
+          "pinID": "exec_out",
+          "type": "execution",
+          "direction": "output",
+          "connected_to": [],
+          "description": "Execution output (unconnected)"
+        }
+      ]
+    }
+  ],
+  "execution_flow": [
+    {
+      "from_event": "On Pick Up (TP_PickUp)",
+      "sequence": [
+        {
+          "type": "function_call",
+          "function": "Attach Weapon",
+          "inputs": {
+            "Target": "TP Weapon",
+            "Target Character": "Pick Up Character"
+          }
+        },
+        {
+          "type": "conditional",
+          "condition": "Attach Weapon Return Value",
+          "true_branch": [
+            {
+              "type": "function_call",
+              "function": "Get Anim Instance",
+              "inputs": {
+                "Target": "Mesh 1P"
+              }
+            },
+            {
+              "type": "cast",
+              "cast_type": "FirstPerson_AnimBP",
+              "object": "Anim Instance"
+            },
+            {
+              "type": "set_variable",
+              "variable": "Has Rifle",
+              "value": true,
+              "target": "Cast Result"
+            }
+          ],
+          "false_branch": [
+            {
+              "type": "comment",
+              "text": "No action taken on failure"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "components": [
+    {
+      "name": "ExampleComponent",
+      "type": "StaticMeshComponent", 
+      "attachment": "RootComponent",
+      "properties": {
+        "StaticMesh": "DefaultMesh",
+        "Material": "DefaultMaterial"
+      }
+    }
+  ],
+  "error_handling": {
+    "validation_rules": [
+      "All execution pins must be connected",
+      "Variable names must be unique",
+      "Function calls must have valid targets",
+      "Cast operations must have valid source objects"
+    ],
+    "error_recovery": {
+      "on_connection_error": "Create default connection",
+      "on_missing_node": "Create placeholder node",
+      "on_cast_failure": "Log warning and continue"
+    }
+  },
+  "meta_data": {
+    "author": "Developer",
+    "version": "1.0",
+    "last_modified": "2024-01-01",
+    "complexity_level": "Advanced",
+    "estimated_performance_impact": "Low"
+  }
+}

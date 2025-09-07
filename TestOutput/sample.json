@@ -1,0 +1,10 @@
+{
+		"test_data": "This is a test JSON file",
+		"timestamp": "2024-01-01",
+		"version": "1.0",
+		"features": [
+			"JSON parsing",
+			"File saving",
+			"Blueprint integration"
+		]
+	}

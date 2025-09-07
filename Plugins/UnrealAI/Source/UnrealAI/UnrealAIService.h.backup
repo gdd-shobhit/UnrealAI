@@ -1,0 +1,817 @@
+#pragma once
+
+#include "CoreMinimal.h"
+#include "UObject/NoExportTypes.h"
+// #include "UnrealAISettings.h"
+#include "HttpModule.h"
+#include "Interfaces/IHttpRequest.h"
+#include "Interfaces/IHttpResponse.h"
+#include "UnrealAITypes.h"
+#include "UnrealAIService.generated.h"
+
+// UAsset Data Structures
+USTRUCT()
+struct FUAssetHeader
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	uint32 MagicNumber = 0;
+
+	UPROPERTY()
+	uint32 Version = 0;
+
+	UPROPERTY()
+	uint32 LicenseeVersion = 0;
+
+	UPROPERTY()
+	uint32 HeaderSize = 0;
+
+	UPROPERTY()
+	uint32 PackageFlags = 0;
+
+	UPROPERTY()
+	uint32 NameCount = 0;
+
+	UPROPERTY()
+	uint32 NameOffset = 0;
+
+	UPROPERTY()
+	uint32 ExportCount = 0;
+
+	UPROPERTY()
+	uint32 ExportOffset = 0;
+
+	UPROPERTY()
+	uint32 ImportCount = 0;
+
+	UPROPERTY()
+	uint32 ImportOffset = 0;
+
+	UPROPERTY()
+	uint32 DependsOffset = 0;
+
+	UPROPERTY()
+	uint32 SoftPackageReferencesCount = 0;
+
+	UPROPERTY()
+	uint32 SoftPackageReferencesOffset = 0;
+
+	UPROPERTY()
+	uint32 AssetRegistryDataOffset = 0;
+
+	UPROPERTY()
+	uint32 WorldTileInfoDataOffset = 0;
+
+	UPROPERTY()
+	uint32 ChunkIDs = 0;
+
+	UPROPERTY()
+	uint32 PreloadDependencyCount = 0;
+
+	UPROPERTY()
+	uint32 PreloadDependencyOffset = 0;
+
+	UPROPERTY()
+	uint32 Names = 0;
+
+	UPROPERTY()
+	uint32 GatherableTextDataCount = 0;
+
+	UPROPERTY()
+	uint32 GatherableTextDataOffset = 0;
+
+	UPROPERTY()
+	uint32 AssetObjectData = 0;
+
+	UPROPERTY()
+	uint32 AssetRegistryData = 0;
+};
+
+USTRUCT()
+struct FUAssetNameEntry
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FString Name;
+
+	UPROPERTY()
+	uint32 Flags = 0;
+
+	UPROPERTY()
+	uint32 NonCasePreservingHash = 0;
+
+	UPROPERTY()
+	uint32 CasePreservingHash = 0;
+};
+
+USTRUCT()
+struct FImportEntry
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FString PackageName;
+
+	UPROPERTY()
+	FString ClassName;
+
+	UPROPERTY()
+	FString ObjectName;
+
+	UPROPERTY()
+	FGuid GUID;
+};
+
+USTRUCT()
+struct FExportEntry
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FString ClassName;
+
+	UPROPERTY()
+	FString SuperClassName;
+
+	UPROPERTY()
+	FString TemplateName;
+
+	UPROPERTY()
+	uint32 ObjectFlags = 0;
+
+	UPROPERTY()
+	uint32 SerialSize = 0;
+
+	UPROPERTY()
+	uint32 SerialOffset = 0;
+
+	UPROPERTY()
+	uint32 ScriptSerializationStartOffset = 0;
+
+	UPROPERTY()
+	uint32 ScriptSerializationEndOffset = 0;
+
+	UPROPERTY()
+	FGuid GUID;
+
+	UPROPERTY()
+	uint32 PackageFlags = 0;
+
+	UPROPERTY()
+	TArray<uint8> AssetData;
+};
+
+USTRUCT()
+struct FUAssetPropertyData
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FString PropertyName;
+
+	UPROPERTY()
+	FString PropertyType;
+
+	UPROPERTY()
+	FString PropertyValue;
+
+	UPROPERTY()
+	uint32 PropertyFlags = 0;
+
+	UPROPERTY()
+	FGuid PropertyGUID;
+};
+
+USTRUCT()
+struct FUAssetStructure
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FUAssetHeader Header;
+
+	UPROPERTY()
+	TArray<FUAssetNameEntry> Names;
+
+	UPROPERTY()
+	TArray<FImportEntry> Imports;
+
+	UPROPERTY()
+	TArray<FExportEntry> Exports;
+
+	UPROPERTY()
+	TArray<FUAssetPropertyData> Properties;
+
+	UPROPERTY()
+	TArray<FGuid> GUIDs;
+
+	UPROPERTY()
+	FString AssetType;
+
+	UPROPERTY()
+	FString AssetName;
+};
+
+// Blueprint-Specific Data Structures for Advanced Parsing
+
+USTRUCT()
+struct FBlueprintPin
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FString PinName;
+
+	UPROPERTY()
+	FString PinType;  // "Exec", "Int", "String", "Vector", etc.
+
+	UPROPERTY()
+	FString Direction;  // "Input", "Output", "InputOutput"
+
+	UPROPERTY()
+	FString DefaultValue;
+
+	UPROPERTY()
+	TArray<FString> ConnectedPins;  // What this pin connects to
+
+	UPROPERTY()
+	FVector2D PinOffset = FVector2D(0.0f, 0.0f);  // Position relative to node
+};
+
+USTRUCT()
+struct FBlueprintNode
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FString NodeID;  // Unique identifier
+
+	UPROPERTY()
+	FString NodeType;  // "UK2Node_Event", "UK2Node_CallFunction", "UK2Node_VariableSet", etc.
+
+	UPROPERTY()
+	FString NodeName;  // "BeginPlay", "SetVariable", "GetVariable", etc.
+
+	UPROPERTY()
+	FString FunctionName;  // For function call nodes
+
+	UPROPERTY()
+	FString VariableName;  // For variable nodes
+
+	UPROPERTY()
+	FVector2D Position = FVector2D(0.0f, 0.0f);  // Node position in graph
+
+	UPROPERTY()
+	TArray<FBlueprintPin> Pins;  // Input/Output pins
+
+	UPROPERTY()
+	TMap<FString, FString> NodeProperties;  // Additional node-specific properties
+};
+
+USTRUCT()
+struct FBlueprintConnection
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FString SourceNodeID;
+
+	UPROPERTY()
+	FString SourcePinName;
+
+	UPROPERTY()
+	FString TargetNodeID;
+
+	UPROPERTY()
+	FString TargetPinName;
+
+	UPROPERTY()
+	FString ConnectionType;  // "Exec", "Data", "Variable"
+};
+
+USTRUCT()
+struct FBlueprintGraphData
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FString GraphName;  // "EventGraph", "FunctionGraph", etc.
+
+	UPROPERTY()
+	FString GraphType;  // "EventGraph", "FunctionGraph", "MacroGraph"
+
+	UPROPERTY()
+	TArray<FBlueprintNode> Nodes;
+
+	UPROPERTY()
+	TArray<FBlueprintConnection> Connections;
+
+	UPROPERTY()
+	TArray<FString> ExecutionFlow;  // Ordered list of node execution
+
+	UPROPERTY()
+	TMap<FString, FString> GraphProperties;  // Graph-specific properties
+};
+
+USTRUCT()
+struct FBlueprintVariable
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FString VariableName;
+
+	UPROPERTY()
+	FString VariableType;  // "Int", "Float", "String", "Vector", etc.
+
+	UPROPERTY()
+	FString DefaultValue;
+
+	UPROPERTY()
+	FString Category;
+
+	UPROPERTY()
+	uint32 VariableFlags = 0;  // Blueprint variable flags
+
+	UPROPERTY()
+	FGuid VariableGUID;
+
+	UPROPERTY()
+	TArray<FString> Tags;  // Variable tags/metadata
+};
+
+USTRUCT()
+struct FBlueprintFunction
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FString FunctionName;
+
+	UPROPERTY()
+	FString FunctionType;  // "Function", "Event", "CustomEvent"
+
+	UPROPERTY()
+	TArray<FBlueprintVariable> InputParameters;
+
+	UPROPERTY()
+	TArray<FBlueprintVariable> OutputParameters;
+
+	UPROPERTY()
+	FString ReturnType;
+
+	UPROPERTY()
+	uint32 FunctionFlags = 0;
+
+	UPROPERTY()
+	FGuid FunctionGUID;
+
+	UPROPERTY()
+	FBlueprintGraphData FunctionGraph;  // The graph for this function
+};
+
+USTRUCT()
+struct FBlueprintComponent
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FString ComponentName;
+
+	UPROPERTY()
+	FString ComponentType;  // "StaticMeshComponent", "CameraComponent", etc.
+
+	UPROPERTY()
+	FString AttachmentSocket;  // What it's attached to
+
+	UPROPERTY()
+	TMap<FString, FString> ComponentProperties;  // Component-specific properties
+
+	UPROPERTY()
+	FGuid ComponentGUID;
+};
+
+USTRUCT()
+struct FBlueprintConflict
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FString ConflictType;  // "NodeConflict", "VariableConflict", "FunctionConflict", "ConnectionConflict"
+
+	UPROPERTY()
+	FString ElementName;  // Name of the conflicting element
+
+	UPROPERTY()
+	FString BaseValue;  // Value in base version
+
+	UPROPERTY()
+	FString ModifiedValue;  // Value in modified version
+
+	UPROPERTY()
+	FString SuggestedResolution;  // AI suggestion for resolution
+
+	UPROPERTY()
+	float ConflictSeverity = 0.0f;  // 0.0 to 1.0, how severe the conflict is
+};
+
+USTRUCT()
+struct FBlueprintStructure
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FString BlueprintName;
+
+	UPROPERTY()
+	FString ParentClass;  // What class it inherits from
+
+	UPROPERTY()
+	FString BlueprintType;  // "Normal", "Interface", "MacroLibrary"
+
+	UPROPERTY()
+	TArray<FBlueprintVariable> Variables;
+
+	UPROPERTY()
+	TArray<FBlueprintFunction> Functions;
+
+	UPROPERTY()
+	TArray<FBlueprintComponent> Components;
+
+	UPROPERTY()
+	TArray<FBlueprintGraphData> Graphs;
+
+	UPROPERTY()
+	TArray<FBlueprintConflict> Conflicts;
+
+	UPROPERTY()
+	TMap<FString, FString> BlueprintProperties;  // General Blueprint properties
+
+	UPROPERTY()
+	TArray<FGuid> AllGUIDs;  // All GUIDs in the Blueprint
+};
+
+UENUM(BlueprintType)
+enum class EAIProvider : uint8
+{
+	LocalLLM UMETA(DisplayName = "Local LLM"),
+	Claude UMETA(DisplayName = "Claude API"),
+	OpenAI UMETA(DisplayName = "OpenAI API")
+};
+
+UENUM(BlueprintType)
+enum class EAIRequestType : uint8
+{
+	BlueprintGeneration UMETA(DisplayName = "Blueprint Generation"),
+	CPPGeneration UMETA(DisplayName = "C++ Generation"),
+	CodeReview UMETA(DisplayName = "Code Review"),
+	Documentation UMETA(DisplayName = "Documentation"),
+	UAssetMerge UMETA(DisplayName = "UAsset Merge"),
+	General UMETA(DisplayName = "General Query")
+};
+
+USTRUCT(BlueprintType)
+struct FAIRequest
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Request")
+	FString Prompt;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Request")
+	EAIRequestType RequestType = EAIRequestType::General;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Request")
+	EAIProvider Provider = EAIProvider::LocalLLM;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Request")
+	float Temperature = 0.7f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Request")
+	int32 MaxTokens = 2048;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Request")
+	TMap<FString, FString> ContextData;
+
+	FAIRequest()
+	{
+		Temperature = 0.7f;
+		MaxTokens = 2048;
+		RequestType = EAIRequestType::General;
+		Provider = EAIProvider::LocalLLM;
+	}
+};
+
+USTRUCT(BlueprintType)
+struct FAIResponse
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Response")
+	FString Content;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Response")
+	bool bSuccess = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Response")
+	FString ErrorMessage;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Response")
+	float ProcessingTime = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Response")
+	EAIProvider UsedProvider = EAIProvider::LocalLLM;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI Response")
+	int32 TokensUsed = 0;
+
+	FAIResponse()
+	{
+		bSuccess = false;
+		ProcessingTime = 0.0f;
+		TokensUsed = 0;
+	}
+};
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAIResponseReceived, const FAIResponse&, Response);
+
+UCLASS(BlueprintType, Blueprintable)
+class UNREALAI_API UUnrealAIService : public UObject
+{
+	GENERATED_BODY()
+
+public:
+	UUnrealAIService();
+
+	// Main AI request function
+	UFUNCTION(BlueprintCallable, Category = "UnrealAI")
+	void SendAIRequest(const FAIRequest& Request);
+
+	// Async version for Blueprint
+	UFUNCTION(BlueprintCallable, Category = "UnrealAI", meta = (BlueprintInternalUseOnly = "true"))
+	void SendAIRequestAsync(const FAIRequest& Request);
+
+	// Blueprint generation specific
+	UFUNCTION(BlueprintCallable, Category = "UnrealAI")
+	FAIResponse GenerateBlueprint(const FString& Description, const TMap<FString, FString>& Context);
+
+	UFUNCTION(BlueprintCallable, Category = "UnrealAI")
+	FAIResponse GenerateBlueprintSimple(const FString& Description);
+
+	// Async versions for UI
+	UFUNCTION(BlueprintCallable, Category = "UnrealAI")
+	void GenerateBlueprintSimpleAsync(const FString& Description);
+
+	// C++ generation specific
+	UFUNCTION(BlueprintCallable, Category = "UnrealAI")
+	FAIResponse GenerateCPPCode(const FString& Description, const TMap<FString, FString>& Context);
+
+	UFUNCTION(BlueprintCallable, Category = "UnrealAI")
+	FAIResponse GenerateCPPCodeSimple(const FString& Description);
+
+	// Async versions for UI
+	UFUNCTION(BlueprintCallable, Category = "UnrealAI")
+	void GenerateCPPCodeSimpleAsync(const FString& Description);
+
+	UFUNCTION(BlueprintCallable, Category = "UnrealAI")
+	void ReviewCodeAsync(const FString& Code, const FString& Language = TEXT("cpp"));
+
+	// Code review
+	UFUNCTION(BlueprintCallable, Category = "UnrealAI")
+	FAIResponse ReviewCode(const FString& Code, const FString& Language = TEXT("cpp"));
+
+	// Configuration
+	UFUNCTION(BlueprintCallable, Category = "UnrealAI")
+	void SetLocalLLMEndpoint(const FString& Endpoint);
+
+	UFUNCTION(BlueprintCallable, Category = "UnrealAI")
+	void SetClaudeAPIKey(const FString& APIKey);
+
+	UFUNCTION(BlueprintCallable, Category = "UnrealAI")
+	void SetOpenAIAPIKey(const FString& APIKey);
+
+	// Status and configuration
+	UFUNCTION(BlueprintPure, Category = "UnrealAI")
+	bool IsLocalLLMAvailable() const;
+
+	UFUNCTION(BlueprintPure, Category = "UnrealAI")
+	bool IsClaudeAvailable() const;
+
+	UFUNCTION(BlueprintPure, Category = "UnrealAI")
+	bool IsOpenAIAvailable() const;
+
+	// Events
+	UPROPERTY(BlueprintAssignable, Category = "UnrealAI")
+	FOnAIResponseReceived OnResponseReceived;
+
+	UPROPERTY(BlueprintAssignable, Category = "UnrealAI")
+	FOnAIResponseReceived OnBlueprintGenerated;
+
+	UPROPERTY(BlueprintAssignable, Category = "UnrealAI")
+	FOnAIResponseReceived OnCPPGenerated;
+
+	UPROPERTY(BlueprintAssignable, Category = "UnrealAI")
+	FOnAIResponseReceived OnCodeReviewed;
+
+protected:
+	// Internal processing functions
+	virtual void ProcessRequest(const FAIRequest& Request);
+	virtual FAIResponse ProcessLocalLLMRequest(const FAIRequest& Request);
+	virtual FAIResponse ProcessClaudeRequest(const FAIRequest& Request);
+	virtual FAIResponse ProcessOpenAIRequest(const FAIRequest& Request);
+
+public:
+	// Synchronous request processing
+	virtual FAIResponse ProcessRequestSync(const FAIRequest& Request);
+
+	// Asynchronous request processing
+	void ProcessRequestAsync(const FAIRequest& Request, TFunction<void(const FAIResponse&)> OnCompleteCallback);
+
+	// Async HTTP processing functions
+	virtual void ProcessLocalLLMRequestAsync(const FAIRequest& Request);
+	virtual void ProcessClaudeRequestAsync(const FAIRequest& Request);
+	virtual void ProcessOpenAIRequestAsync(const FAIRequest& Request);
+
+	// Helper functions
+	virtual FString BuildPrompt(const FAIRequest& Request);
+	virtual FString BuildBlueprintPrompt(const FString& Description, const TMap<FString, FString>& Context);
+	virtual FString BuildCPPPrompt(const FString& Description, const TMap<FString, FString>& Context);
+	virtual FString BuildCodeReviewPrompt(const FString& Code, const FString& Language);
+
+	// HTTP response handler
+	void OnHTTPResponseReceived(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSuccess);
+
+private:
+	// Configuration (loaded from settings)
+	FString LocalLLMEndpoint;
+	FString ClaudeAPIKey;
+	FString OpenAIAPIKey;
+	bool bEnableLocalLLM = true;
+	bool bEnableClaude = false;
+	bool bEnableOpenAI = false;
+
+	// Settings management
+	void LoadSettings();
+
+	// Async callback storage
+	TFunction<void(const FAIResponse&)> CurrentAsyncCallback;
+
+	// Blueprint creation helpers
+	bool CreateBlueprintFromJSON(const FString& JsonString, FString& OutBlueprintPath, FString& OutError);
+	bool ParseBlueprintJSON(const FString& JsonString, TMap<FString, FString>& OutBlueprintStructure, FString& OutError);
+	bool GenerateBlueprintNodesFromJSON(const TMap<FString, FString>& BlueprintStructure, FString& OutError);
+	bool AddVariablesToBlueprint(UBlueprint* Blueprint, const FString& VariablesJson, FString& OutError);
+	bool CreateBasicEventGraph(UBlueprint* Blueprint, const TMap<FString, FString>& BlueprintStructure, FString& OutError);
+	bool CreateExecutionFlowNodes(UBlueprint* Blueprint, UEdGraph* EventGraph, const FString& ExecutionFlowJson, FString& OutError);
+	bool CreateFunctionGraphs(UBlueprint* Blueprint, const TMap<FString, FString>& BlueprintStructure, FString& OutError);
+	bool CreateBlueprintComponents(UBlueprint* Blueprint, const FString& ComponentsJson, FString& OutError);
+
+	// Node creation helper functions
+	UK2Node* CreateVariableSetNode(UBlueprint* Blueprint, UEdGraph* Graph, const FString& SequenceStep);
+	UK2Node* CreateFunctionCallNode(UBlueprint* Blueprint, UEdGraph* Graph, const FString& SequenceStep);
+	UK2Node* CreateBranchNode(UBlueprint* Blueprint, UEdGraph* Graph, const FString& SequenceStep);
+	UK2Node* CreateVariableGetNode(UBlueprint* Blueprint, UEdGraph* Graph, const FString& SequenceStep);
+	void PositionNodesInGraph(UEdGraph* Graph, const TArray<UK2Node*>& Nodes);
+
+	// JSON parsing helper
+	FString ExtractJSONFromResponse(const FString& Response);
+
+	// Function logic creation helper
+	bool CreateFunctionLogicNodes(UEdGraph* FunctionGraph, const FString& FunctionLogic, FString& OutError);
+	bool IsUnrealBuiltInEvent(const FString& FunctionName);
+
+	// UAsset merging functionality
+	bool ProcessUAssetMergeRequest(const FAIRequest& Request, FAIResponse& OutResponse);
+	bool ReadUAssetFile(const FString& FilePath, TArray<uint8>& OutData, FString& OutError);
+	bool WriteUAssetFile(const FString& FilePath, const TArray<uint8>& AssetData, FString& OutError);
+	
+	// UAsset Parser (Deserializer)
+	bool ParseUAsset(const TArray<uint8>& RawData, FUAssetStructure& OutStructure, FString& OutError);
+	bool ParseUAssetHeader(FArchive& Archive, FUAssetHeader& OutHeader, FString& OutError);
+	bool ParseNameTable(FArchive& Archive, const FUAssetHeader& Header, TArray<FUAssetNameEntry>& OutNames, FString& OutError);
+	bool ParseImportTable(FArchive& Archive, const FUAssetHeader& Header, TArray<FImportEntry>& OutImports, FString& OutError);
+	bool ParseExportTable(FArchive& Archive, const FUAssetHeader& Header, TArray<FExportEntry>& OutExports, FString& OutError);
+	bool ParseAssetData(FArchive& Archive, const FUAssetHeader& Header, TArray<FUAssetPropertyData>& OutProperties, FString& OutError);
+	
+	// UAsset Serializer
+	bool SerializeUAsset(const FUAssetStructure& Structure, TArray<uint8>& OutData, FString& OutError);
+	bool SerializeUAssetHeader(FArchive& Archive, const FUAssetHeader& Header, FString& OutError);
+	bool SerializeNameTable(FArchive& Archive, const TArray<FUAssetNameEntry>& Names, FString& OutError);
+	bool SerializeImportTable(FArchive& Archive, const TArray<FImportEntry>& Imports, FString& OutError);
+	bool SerializeExportTable(FArchive& Archive, const TArray<FExportEntry>& Exports, FString& OutError);
+	bool SerializeAssetData(FArchive& Archive, const TArray<FUAssetPropertyData>& Properties, FString& OutError);
+	
+	// AI-Guided UAsset Merging
+	bool AnalyzeUAssetWithAI(const FUAssetStructure& Structure, const FString& AssetPath, FString& OutAnalysis, FString& OutError);
+	bool MergeUAssetsWithAI(const FUAssetStructure& BaseStructure, const FUAssetStructure& ModifiedStructure, const FString& Analysis, FUAssetStructure& OutMergedStructure, FString& OutError);
+	FString BuildUAssetAnalysisPrompt(const FUAssetStructure& Structure, const FString& AssetPath);
+	FString BuildUAssetMergePrompt(const FUAssetStructure& BaseStructure, const FUAssetStructure& ModifiedStructure, const FString& AssetPath);
+	
+	// UAsset Utility Functions
+	bool ExtractGUIDs(const FUAssetStructure& Structure, TArray<FGuid>& OutGUIDs);
+	bool PreserveGUIDs(const TArray<FGuid>& BaseGUIDs, const TArray<FGuid>& ModifiedGUIDs, TArray<FGuid>& OutMergedGUIDs);
+	bool ResolvePropertyConflicts(const FUAssetPropertyData& BaseProperty, const FUAssetPropertyData& ModifiedProperty, FUAssetPropertyData& OutResolvedProperty, const FString& AIGuidance);
+	bool ResolveExportConflict(const FExportEntry& BaseExport, const FExportEntry& ModifiedExport, FExportEntry& OutResolvedExport, const FString& AIGuidance);
+
+	// Blueprint-Specific Parsing and Analysis Functions
+
+	// Blueprint Structure Analysis
+	bool ParseBlueprintStructure(const FUAssetStructure& UAssetStructure, FBlueprintStructure& OutBlueprintStructure, FString& OutError);
+	bool IsBlueprintAsset(const FUAssetStructure& UAssetStructure);
+	bool ExtractBlueprintName(const FUAssetStructure& UAssetStructure, FString& OutBlueprintName, FString& OutParentClass);
+
+	// Graph Analysis
+	bool ParseBlueprintGraphs(const FUAssetStructure& UAssetStructure, TArray<FBlueprintGraphData>& OutGraphs, FString& OutError);
+	bool ParseBlueprintGraph(const TArray<uint8>& GraphData, FBlueprintGraphData& OutGraph, FString& OutError);
+	bool ExtractExecutionFlow(const FBlueprintGraphData& Graph, TArray<FString>& OutFlow, FString& OutError);
+	bool MapNodeConnections(const TArray<FBlueprintNode>& Nodes, const TArray<FBlueprintConnection>& Connections, TMap<FString, TArray<FString>>& OutConnections);
+
+	// Node Analysis
+	bool ParseBlueprintNodes(const TArray<uint8>& NodeData, TArray<FBlueprintNode>& OutNodes, FString& OutError);
+	bool ParseSingleBlueprintNode(FMemoryReader& Reader, FBlueprintNode& OutNode, FString& OutError);
+	bool ParseNodeConnections(FMemoryReader& Reader, TArray<FBlueprintNode>& Nodes, FString& OutError);
+	bool ParseBlueprintNode(const TArray<uint8>& NodeData, FBlueprintNode& OutNode, FString& OutError);
+	bool ExtractNodePins(const TArray<uint8>& PinData, TArray<FBlueprintPin>& OutPins, FString& OutError);
+	bool FindExecutionPaths(const FBlueprintGraphData& Graph, TArray<TArray<FString>>& OutPaths, FString& OutError);
+	void TraceExecutionPath(const FBlueprintGraphData& Graph, const FString& CurrentNodeID, TArray<FString>& OutFlow, TArray<FString>& VisitedNodes);
+
+	// Enhanced Function Logic Creation
+	bool ParseFunctionLogicFromJSON(const FString& JSONLogic, TArray<FString>& OutSteps, FString& OutError);
+	UK2Node* CreateReturnNode(UEdGraph* Graph, const FString& ReturnValue);
+	UK2Node* CreatePrintNode(UEdGraph* Graph, const FString& PrintText);
+	UK2Node* CreateGenericActionNode(UEdGraph* Graph, const FString& ActionText);
+	UK2Node* CreateMathOperationNode(UEdGraph* Graph, const FString& Operation, const FString& Target, const FString& Value);
+	bool ValidateFunctionConnections(UEdGraph* FunctionGraph, FString& OutError);
+	void OptimizeFunctionLayout(UEdGraph* FunctionGraph);
+
+	// Enhanced Property Processing
+	FString GetPropertyTypeFromIndex(int32 TypeIndex);
+	bool ParsePropertyValue(FMemoryReader& Reader, const FString& PropertyType, uint32 PropertySize, FString& OutValue, FString& OutError);
+	void CreateDefaultProperties(TArray<FUAssetPropertyData>& OutProperties);
+	uint32 CalculatePropertySize(const FUAssetPropertyData& Property);
+	bool SerializePropertyValue(FArchive& Archive, const FString& PropertyType, const FString& PropertyValue);
+	
+	// Name Resolution System
+	FString ResolveNameFromIndex(int32 NameIndex, const TArray<FUAssetNameEntry>& NameTable);
+	bool BuildNameTable(FMemoryReader& Reader, TArray<FUAssetNameEntry>& OutNameTable, FString& OutError);
+	bool ResolveName(int32 Index, const TArray<FUAssetNameEntry>& NameTable, FString& OutName);
+	
+	// Enhanced Import/Export Resolution
+	bool ResolveImportReference(int32 ImportIndex, const TArray<FImportEntry>& ImportTable, FString& OutReference);
+	bool ResolveExportReference(int32 ExportIndex, const TArray<FExportEntry>& ExportTable, FString& OutReference);
+	bool BuildReferenceMap(const TArray<FImportEntry>& Imports, const TArray<FExportEntry>& Exports, TMap<int32, FString>& OutReferenceMap);
+	
+	// Robust Validation and Error Handling
+	bool ValidateUAssetHeader(const FUAssetHeader& Header, FString& OutError);
+	bool ValidatePropertyData(const FUAssetPropertyData& Property, FString& OutError);
+	bool ValidateBlueprintNode(const FBlueprintNode& Node, FString& OutError);
+	bool ValidateArchiveIntegrity(FArchive& Archive, uint32 ExpectedSize, FString& OutError);
+	bool ValidateMemoryBounds(const TArray<uint8>& Data, uint32 Offset, uint32 Size, FString& OutError);
+	void LogParsingProgress(const FString& Operation, int32 Current, int32 Total);
+	bool RecoverFromParsingError(FArchive& Archive, const FString& ErrorContext, FString& OutError);
+
+	// Variable and Function Analysis
+	bool ExtractBlueprintVariables(const FUAssetStructure& UAssetStructure, TArray<FBlueprintVariable>& OutVariables, FString& OutError);
+	bool ExtractBlueprintFunctions(const FUAssetStructure& UAssetStructure, TArray<FBlueprintFunction>& OutFunctions, FString& OutError);
+	bool ParseBlueprintVariable(const TArray<uint8>& VariableData, FBlueprintVariable& OutVariable, FString& OutError);
+	bool ParseBlueprintFunction(const TArray<uint8>& FunctionData, FBlueprintFunction& OutFunction, FString& OutError);
+
+	// Component Analysis
+	bool ParseComponentHierarchy(const FUAssetStructure& UAssetStructure, TArray<FBlueprintComponent>& OutComponents, FString& OutError);
+	bool ExtractClassHierarchy(const FUAssetStructure& UAssetStructure, FString& OutParentClass, FString& OutError);
+
+	// Blueprint-Specific Merging
+	bool MergeBlueprintStructures(const FBlueprintStructure& BaseBlueprint, const FBlueprintStructure& ModifiedBlueprint, FBlueprintStructure& OutMergedBlueprint, FString& OutError);
+	bool MergeBlueprintGraphs(const FBlueprintGraphData& BaseGraph, const FBlueprintGraphData& ModifiedGraph, FBlueprintGraphData& OutMergedGraph, FString& OutError);
+	bool MergeBlueprintVariables(const TArray<FBlueprintVariable>& BaseVariables, const TArray<FBlueprintVariable>& ModifiedVariables, TArray<FBlueprintVariable>& OutMergedVariables, FString& OutError);
+	bool MergeBlueprintFunctions(const TArray<FBlueprintFunction>& BaseFunctions, const TArray<FBlueprintFunction>& ModifiedFunctions, TArray<FBlueprintFunction>& OutMergedFunctions, FString& OutError);
+
+	// Conflict Detection and Resolution
+	bool DetectBlueprintConflicts(const FBlueprintStructure& BaseBlueprint, const FBlueprintStructure& ModifiedBlueprint, TArray<FBlueprintConflict>& OutConflicts, FString& OutError);
+	bool DetectNodeConflicts(const FBlueprintGraphData& BaseGraph, const FBlueprintGraphData& ModifiedGraph, TArray<FBlueprintConflict>& OutConflicts, FString& OutError);
+	bool DetectVariableConflicts(const TArray<FBlueprintVariable>& BaseVariables, const TArray<FBlueprintVariable>& ModifiedVariables, TArray<FBlueprintConflict>& OutConflicts, FString& OutError);
+	bool DetectFunctionConflicts(const TArray<FBlueprintFunction>& BaseFunctions, const TArray<FBlueprintFunction>& ModifiedFunctions, TArray<FBlueprintConflict>& OutConflicts, FString& OutError);
+	bool ResolveBlueprintConflict(const FBlueprintConflict& Conflict, const FString& AIGuidance, FString& OutResolvedValue, FString& OutError);
+
+	// AI-Powered Blueprint Analysis
+	FString BuildBlueprintAnalysisPrompt(const FBlueprintStructure& BlueprintStructure);
+	FString BuildBlueprintMergePrompt(const FBlueprintStructure& BaseBlueprint, const FBlueprintStructure& ModifiedBlueprint, const TArray<FBlueprintConflict>& Conflicts);
+	FString BuildBlueprintConflictResolutionPrompt(const FBlueprintConflict& Conflict, const FBlueprintStructure& BaseBlueprint, const FBlueprintStructure& ModifiedBlueprint);
+
+	// Blueprint Serialization
+	bool SerializeBlueprintStructure(const FBlueprintStructure& BlueprintStructure, FUAssetStructure& OutUAssetStructure, FString& OutError);
+	bool SerializeBlueprintGraph(const FBlueprintGraphData& Graph, TArray<uint8>& OutGraphData, FString& OutError);
+	bool SerializeBlueprintNode(const FBlueprintNode& Node, TArray<uint8>& OutNodeData, FString& OutError);
+	bool SerializeBlueprintVariable(const FBlueprintVariable& Variable, TArray<uint8>& OutVariableData, FString& OutError);
+	bool SerializeBlueprintFunction(const FBlueprintFunction& Function, TArray<uint8>& OutFunctionData, FString& OutError);
+
+	// Utility Functions
+	bool ValidateBlueprintStructure(const FBlueprintStructure& BlueprintStructure, FString& OutError);
+	bool CalculateBlueprintComplexity(const FBlueprintStructure& BlueprintStructure, float& OutComplexity);
+	bool GenerateBlueprintSummary(const FBlueprintStructure& BlueprintStructure, FString& OutSummary);
+
+	// HTTP request handling (temporarily disabled)
+	// void OnHTTPResponseReceived(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSuccess);
+};

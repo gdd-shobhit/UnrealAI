@@ -1,0 +1,79 @@
+#include "UnrealAISettings.h"
+
+UUnrealAISettings::UUnrealAISettings()
+{
+	CategoryName = TEXT("Plugins");
+}
+
+FName UUnrealAISettings::GetCategoryName() const
+{
+	return CategoryName;
+}
+
+FText UUnrealAISettings::GetSectionText() const
+{
+	return FText::FromString(TEXT("UnrealAI"));
+}
+
+bool UUnrealAISettings::ValidateLocalLLMConfiguration() const
+{
+	if (!bEnableLocalLLM)
+	{
+		return false;
+	}
+
+	if (LocalLLMEndpoint.IsEmpty())
+	{
+		return false;
+	}
+
+	// Basic URL validation
+	if (!LocalLLMEndpoint.StartsWith(TEXT("http://")) && !LocalLLMEndpoint.StartsWith(TEXT("https://")))
+	{
+		return false;
+	}
+
+	return true;
+}
+
+bool UUnrealAISettings::ValidateClaudeConfiguration() const
+{
+	if (!bEnableClaude)
+	{
+		return false;
+	}
+
+	if (ClaudeAPIKey.IsEmpty())
+	{
+		return false;
+	}
+
+	// Basic API key validation (Claude API keys typically start with "sk-ant-")
+	if (!ClaudeAPIKey.StartsWith(TEXT("sk-ant-")))
+	{
+		return false;
+	}
+
+	return true;
+}
+
+bool UUnrealAISettings::ValidateOpenAIConfiguration() const
+{
+	if (!bEnableOpenAI)
+	{
+		return false;
+	}
+
+	if (OpenAIAPIKey.IsEmpty())
+	{
+		return false;
+	}
+
+	// Basic API key validation (OpenAI API keys typically start with "sk-")
+	if (!OpenAIAPIKey.StartsWith(TEXT("sk-")))
+	{
+		return false;
+	}
+
+	return true;
+}

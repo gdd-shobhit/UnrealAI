@@ -1,0 +1,60 @@
+{
+  "functionName": "RollDice",
+  "variables": [
+    { "pinCategory": "Int" }
+  ],
+  "nodes": [
+    {
+      "nodeId": "11111111-1111-1111-1111-111111111111",
+      "nodeClassPath": "/Script/BlueprintGraph.K2Node_CallFunction",
+      "nodePosition": [ -400, -50 ],
+      "metadata": { "functionName": "GetActorForwardVector" },
+      "pinHints": {
+        "ReturnValue": { "pinCategory": "Vector" },
+        "Target": { "pinCategory": "Object", "pinSubCategoryObjectPath": "/Script/Engine.Actor" }
+      }
+    },
+    {
+      "nodeId": "22222222-2222-2222-2222-222222222222",
+      "nodeClassPath": "/Script/BlueprintGraph.K2Node_CallFunction",
+      "nodePosition": [ -50, -50 ],
+      "metadata": { "functionName": "VectorLength" },
+      "pinHints": {
+        "A": { "pinCategory": "Vector" },
+        "ReturnValue": { "pinCategory": "Float" }
+      }
+    },
+    {
+      "nodeId": "33333333-3333-3333-3333-333333333333",
+      "nodeClassPath": "/Script/BlueprintGraph.K2Node_CallFunction",
+      "nodePosition": [ -400, 150 ],
+      "metadata": { "functionName": "RandomFloat" },
+      "pinHints": {
+        "ReturnValue": { "pinCategory": "Float" }
+      }
+    },
+    {
+      "nodeId": "44444444-4444-4444-4444-444444444444",
+      "nodeClassPath": "/Script/BlueprintGraph.K2Node_CallFunction",
+      "nodePosition": [ 300, 50 ],
+      "metadata": { "functionName": "RollDice" },
+      "pinHints": {
+        "Seed": { "pinCategory": "Float" }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": { "nodeId": "11111111-1111-1111-1111-111111111111", "pinName": "ReturnValue" },
+      "to":   { "nodeId": "22222222-2222-2222-2222-222222222222", "pinName": "A" }
+    },
+    {
+      "from": { "nodeId": "33333333-3333-3333-3333-333333333333", "pinName": "ReturnValue" },
+      "to":   { "nodeId": "44444444-4444-4444-4444-444444444444", "pinName": "Seed" }
+    },
+    {
+      "from": { "nodeId": "22222222-2222-2222-2222-222222222222", "pinName": "ReturnValue" },
+      "to":   { "nodeId": "44444444-4444-4444-4444-444444444444", "pinName": "Seed" }
+    }
+  ]
+}

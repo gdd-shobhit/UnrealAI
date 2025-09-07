@@ -119,4 +119,6 @@ public:
 	static bool ArePinTypesCompatible(const FEdGraphPinType& a, const FEdGraphPinType& b);
 	static bool InsertConversionNodeIfNeeded(UEdGraph* functionGraph, UEdGraphPin* outPin, UEdGraphPin* inPin);
 	static void SetNodeGuid(UEdGraphNode* node, const FGuid& guid);
+	static bool ParseFunctionGraphDescriptorFromJson(const FString& jsonString, FFunctionGraphDescriptor& outDesc);
+	static bool AddBlueprintFunctionFromJsonFile(UBlueprint* blueprint, const FString& jsonFilePath);
 };

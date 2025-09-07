@@ -16,6 +16,327 @@ FBlueprintJsonParser::~FBlueprintJsonParser()
 	// Destructor
 }
 
+// Forward helpers
+static bool ParsePinTypeFromJson(const TSharedPtr<FJsonObject>& jsonObj, FEdGraphPinType& outPinType);
+static EEdGraphPinDirection ParsePinDirectionFromString(const FString& s);
+
+/** Load JSON file contents and create the function graph on blueprint */
+bool FBlueprintJsonParser::AddBlueprintFunctionFromJsonFile(UBlueprint* blueprint, const FString& jsonFilePath)
+{
+    if (jsonFilePath.IsEmpty() || !FPaths::FileExists(jsonFilePath))
+    {
+        UE_LOG(LogTemp, Error, TEXT("addBlueprintFunctionFromJsonFile: path invalid or file does not exist: %s"), *jsonFilePath);
+        return false;
+    }
+
+    FString fileContents;
+    if (!FFileHelper::LoadFileToString(fileContents, *jsonFilePath))
+    {
+        UE_LOG(LogTemp, Error, TEXT("addBlueprintFunctionFromJsonFile: failed to read file: %s"), *jsonFilePath);
+        return false;
+    }
+
+    FFunctionGraphDescriptor graphDesc;
+    if (!ParseFunctionGraphDescriptorFromJson(fileContents, graphDesc))
+    {
+        UE_LOG(LogTemp, Error, TEXT("addBlueprintFunctionFromJsonFile: failed to parse JSON"));
+        return false;
+    }
+
+    // Create the function graph using previously implemented method
+    return AddBlueprintFunctionFromDescriptor(blueprint, graphDesc);
+}
+
+/** Parse a pin type object from JSON into FEdGraphPinType.
+ *
+ * JSON accepted form:
+ * {
+ *   "pinCategory": "Float" | "Int" | "String" | "Bool" | "Vector" | "Object" | "Struct" | "Exec",
+ *   "pinSubCategoryObjectPath": "/Script/Engine.Actor", // optional
+ *   "isArray": false,
+ *   "isReference": false
+ * }
+ */
+static bool ParsePinTypeFromJson(const TSharedPtr<FJsonObject>& jsonObj, FEdGraphPinType& outPinType)
+{
+    outPinType = FEdGraphPinType();
+
+    FString category;
+    if (!jsonObj->TryGetStringField(TEXT("pinCategory"), category))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("parsePinTypeFromJson: missing pinCategory"));
+        return false;
+    }
+
+    // map friendly name -> UE schema PC_* names
+    if (category.Equals(TEXT("Float"), ESearchCase::IgnoreCase))
+        outPinType.PinCategory = UEdGraphSchema_K2::PC_Float;
+    else if (category.Equals(TEXT("Int"), ESearchCase::IgnoreCase))
+        outPinType.PinCategory = UEdGraphSchema_K2::PC_Int;
+    else if (category.Equals(TEXT("String"), ESearchCase::IgnoreCase))
+        outPinType.PinCategory = UEdGraphSchema_K2::PC_String;
+    else if (category.Equals(TEXT("Bool"), ESearchCase::IgnoreCase))
+        outPinType.PinCategory = UEdGraphSchema_K2::PC_Boolean;
+    else if (category.Equals(TEXT("Vector"), ESearchCase::IgnoreCase))
+        outPinType.PinCategory = UEdGraphSchema_K2::PC_Struct, outPinType.PinSubCategory = UEdGraphSchema_K2::PC_Struct.ToString(); // fallback, will set object below
+    else if (category.Equals(TEXT("Object"), ESearchCase::IgnoreCase))
+        outPinType.PinCategory = UEdGraphSchema_K2::PC_Object;
+    else if (category.Equals(TEXT("Struct"), ESearchCase::IgnoreCase))
+        outPinType.PinCategory = UEdGraphSchema_K2::PC_Struct;
+    else if (category.Equals(TEXT("Exec"), ESearchCase::IgnoreCase))
+        outPinType.PinCategory = UEdGraphSchema_K2::PC_Exec;
+    else
+    {
+        // fallback: treat as object class name if provided
+        UE_LOG(LogTemp, Warning, TEXT("parsePinTypeFromJson: unknown pinCategory '%s' - treating as object"), *category);
+        outPinType.PinCategory = UEdGraphSchema_K2::PC_Object;
+    }
+
+    // pinSubCategoryObjectPath (optional)
+    FString subObjPath;
+    if (jsonObj->TryGetStringField(TEXT("pinSubCategoryObjectPath"), subObjPath) && !subObjPath.IsEmpty())
+    {
+        // Try loading the referenced object (UClass or UScriptStruct)
+        UObject* subObj = LoadObject<UObject>(nullptr, *subObjPath);
+        if (subObj)
+        {
+            outPinType.PinSubCategoryObject = subObj;
+        }
+        else
+        {
+            // If path failed, try to find by class name only
+            FString className = FPackageName::ObjectPathToObjectName(subObjPath);
+            UClass* foundClass = FindObject<UClass>(ANY_PACKAGE, *className);
+            if (foundClass)
+            {
+                outPinType.PinSubCategoryObject = foundClass;
+            }
+            else
+            {
+                UE_LOG(LogTemp, Warning, TEXT("parsePinTypeFromJson: failed to resolve pinSubCategoryObjectPath '%s'"), *subObjPath);
+            }
+        }
+    }
+    // arrays and references
+    bool isArray = false;
+    jsonObj->TryGetBoolField(TEXT("isArray"), isArray);
+    outPinType.ContainerType = isArray ? EPinContainerType::Array : EPinContainerType::None;
+
+    bool isRef = false;
+    jsonObj->TryGetBoolField(TEXT("isReference"), isRef);
+    outPinType.bIsReference = isRef;
+
+    return true;
+}
+
+/** Turn friendly string into pin direction */
+static EEdGraphPinDirection ParsePinDirectionFromString(const FString& s)
+{
+    if (s.Equals(TEXT("Input"), ESearchCase::IgnoreCase) || s.Equals(TEXT("In"), ESearchCase::IgnoreCase))
+        return EGPD_Input;
+    if (s.Equals(TEXT("Output"), ESearchCase::IgnoreCase) || s.Equals(TEXT("Out"), ESearchCase::IgnoreCase))
+        return EGPD_Output;
+    if (s.Equals(TEXT("Exec"), ESearchCase::IgnoreCase))
+        return EGPD_Output; // exec pins are outputs from call nodes typically
+    return EGPD_MAX;
+}
+
+/** Parse a JSON string into FFunctionGraphDescriptor */
+bool FBlueprintJsonParser::ParseFunctionGraphDescriptorFromJson(const FString& jsonString, FFunctionGraphDescriptor& outDesc)
+{
+    outDesc = FFunctionGraphDescriptor(); // reset
+
+    TSharedRef<TJsonReader<>> reader = TJsonReaderFactory<>::Create(jsonString);
+    TSharedPtr<FJsonObject> rootObject;
+    if (!FJsonSerializer::Deserialize(reader, rootObject) || !rootObject.IsValid())
+    {
+        UE_LOG(LogTemp, Error, TEXT("parseFunctionGraphDescriptorFromJson: failed to parse JSON"));
+        return false;
+    }
+
+    // functionName
+    FString functionNameString;
+    if (rootObject->TryGetStringField(TEXT("functionName"), functionNameString))
+    {
+        outDesc.functionName = FName(*functionNameString);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Error, TEXT("parseFunctionGraphDescriptorFromJson: functionName missing"));
+        return false;
+    }
+
+    // variables (optional)
+    const TArray<TSharedPtr<FJsonValue>>* variablesArrayPtr = nullptr;
+    if (rootObject->TryGetArrayField(TEXT("variables"), variablesArrayPtr) && variablesArrayPtr)
+    {
+        for (const TSharedPtr<FJsonValue>& val : *variablesArrayPtr)
+        {
+            if (!val.IsValid() /*|| !val->IsObject()*/) continue;
+            TSharedPtr<FJsonObject> varObj = val->AsObject();
+            FEdGraphPinType pinType;
+            if (ParsePinTypeFromJson(varObj, pinType))
+            {
+                outDesc.variables.Add(TPair<FName, FEdGraphPinType>(TEXT("Test_%s", pinType), pinType));
+            }
+        }
+    }
+
+    // nodes
+    const TArray<TSharedPtr<FJsonValue>>* nodesArrayPtr = nullptr;
+    if (!rootObject->TryGetArrayField(TEXT("nodes"), nodesArrayPtr) || !nodesArrayPtr)
+    {
+        UE_LOG(LogTemp, Error, TEXT("parseFunctionGraphDescriptorFromJson: 'nodes' array missing"));
+        return false;
+    }
+
+    for (const TSharedPtr<FJsonValue>& nVal : *nodesArrayPtr)
+    {
+        if (!nVal.IsValid() /*|| !nVal->IsObject()*/) continue;
+        TSharedPtr<FJsonObject> nObj = nVal->AsObject();
+
+        FNodeDescriptor nodeDesc;
+
+        // nodeId (GUID)
+        FString nodeIdStr;
+        if (nObj->TryGetStringField(TEXT("nodeId"), nodeIdStr) && !nodeIdStr.IsEmpty())
+        {
+            FGuid parsedGuid;
+            if (FGuid::Parse(nodeIdStr, parsedGuid))
+            {
+                nodeDesc.nodeId = parsedGuid;
+            }
+            else
+            {
+                UE_LOG(LogTemp, Warning, TEXT("parseFunctionGraphDescriptorFromJson: invalid GUID '%s'; creating new GUID"), *nodeIdStr);
+                nodeDesc.nodeId = FGuid::NewGuid();
+            }
+        }
+        else
+        {
+            nodeDesc.nodeId = FGuid::NewGuid();
+        }
+
+        // nodeClassPath
+        nObj->TryGetStringField(TEXT("nodeClassPath"), nodeDesc.nodeClassPath);
+
+        // nodePosition
+        const TArray<TSharedPtr<FJsonValue>>* posArrayPtr = nullptr;
+        if (nObj->TryGetArrayField(TEXT("nodePosition"), posArrayPtr) && posArrayPtr && posArrayPtr->Num() >= 2)
+        {
+            double x = (*posArrayPtr)[0]->AsNumber();
+            double y = (*posArrayPtr)[1]->AsNumber();
+            nodeDesc.nodePosition = FVector2D((float)x, (float)y);
+        }
+
+        // metadata (optional)
+        const TSharedPtr<FJsonObject>* metaObjPtr = nullptr;
+        if (nObj->TryGetObjectField(TEXT("metadata"), metaObjPtr) && metaObjPtr && (*metaObjPtr).IsValid())
+        {
+            for (auto& kv : (*metaObjPtr)->Values)
+            {
+                FString key = kv.Key;
+                FString value;
+                if (kv.Value.IsValid())
+                    value = kv.Value->AsString();
+                nodeDesc.metadata.Add(key, value);
+            }
+        }
+
+        // pinHints (optional)
+        const TSharedPtr<FJsonObject>* pinHintsObjPtr = nullptr;
+        if (nObj->TryGetObjectField(TEXT("pinHints"), pinHintsObjPtr) && pinHintsObjPtr && (*pinHintsObjPtr).IsValid())
+        {
+            for (const auto& kv : (*pinHintsObjPtr)->Values)
+            {
+                FName pinName(*kv.Key);
+                const TSharedPtr<FJsonValue>& pinVal = kv.Value;
+                if (!pinVal.IsValid() /*|| !pinVal->IsObject()*/) continue;
+                TSharedPtr<FJsonObject> pinObj = pinVal->AsObject();
+                FEdGraphPinType hintType;
+                if (ParsePinTypeFromJson(pinObj, hintType))
+                {
+                    nodeDesc.pinHints.Add(pinName, hintType);
+                }
+            }
+        }
+
+        outDesc.nodes.Add(nodeDesc);
+    }
+
+    // connections
+    const TArray<TSharedPtr<FJsonValue>>* consArrayPtr = nullptr;
+    if (rootObject->TryGetArrayField(TEXT("connections"), consArrayPtr) && consArrayPtr)
+    {
+        for (const TSharedPtr<FJsonValue>& cVal : *consArrayPtr)
+        {
+            if (!cVal.IsValid() /*|| !cVal.IsObject()*/) continue;
+            TSharedPtr<FJsonObject> cObj = cVal->AsObject();
+
+            FNodeConnection conn;
+
+            // from
+            const TSharedPtr<FJsonObject>* fromObjPtr = nullptr;
+            if (cObj->TryGetObjectField(TEXT("from"), fromObjPtr) && fromObjPtr && (*fromObjPtr).IsValid())
+            {
+                FString fromIdStr;
+                (*fromObjPtr)->TryGetStringField(TEXT("nodeId"), fromIdStr);
+                FGuid fromGuid;
+                if (!fromIdStr.IsEmpty() && FGuid::Parse(fromIdStr, fromGuid))
+                {
+                    conn.from.nodeId = fromGuid;
+                }
+                else
+                {
+                    UE_LOG(LogTemp, Warning, TEXT("parseFunctionGraphDescriptorFromJson: connection.from.nodeId missing or invalid"));
+                    continue;
+                }
+
+                FString fromPinName;
+                (*fromObjPtr)->TryGetStringField(TEXT("pinName"), fromPinName);
+                if (!fromPinName.IsEmpty())
+                    conn.from.pinName = FName(*fromPinName);
+
+                FString dirStr;
+                if ((*fromObjPtr)->TryGetStringField(TEXT("pinDirection"), dirStr))
+                    conn.from.pinDirection = ParsePinDirectionFromString(dirStr);
+            }
+
+            // to
+            const TSharedPtr<FJsonObject>* toObjPtr = nullptr;
+            if (cObj->TryGetObjectField(TEXT("to"), toObjPtr) && toObjPtr && (*toObjPtr).IsValid())
+            {
+                FString toIdStr;
+                (*toObjPtr)->TryGetStringField(TEXT("nodeId"), toIdStr);
+                FGuid toGuid;
+                if (!toIdStr.IsEmpty() && FGuid::Parse(toIdStr, toGuid))
+                {
+                    conn.to.nodeId = toGuid;
+                }
+                else
+                {
+                    UE_LOG(LogTemp, Warning, TEXT("parseFunctionGraphDescriptorFromJson: connection.to.nodeId missing or invalid"));
+                    continue;
+                }
+
+                FString toPinName;
+                (*toObjPtr)->TryGetStringField(TEXT("pinName"), toPinName);
+                if (!toPinName.IsEmpty())
+                    conn.to.pinName = FName(*toPinName);
+
+                FString dirStr;
+                if ((*toObjPtr)->TryGetStringField(TEXT("pinDirection"), dirStr))
+                    conn.to.pinDirection = ParsePinDirectionFromString(dirStr);
+            }
+
+            outDesc.connections.Add(conn);
+        }
+    }
+
+    // Done parsing
+    return true;
+}
+
 bool FBlueprintJsonParser::AddBlueprintFunctionFromDescriptor(UBlueprint* blueprint, const FFunctionGraphDescriptor& graphDesc)
 {
 	if (!blueprint)
@@ -485,7 +806,7 @@ FBlueprintInfo FBlueprintJsonParser::ExtractBlueprintInfo(UBlueprint* blueprint)
 		}
 
 		//AddFunctionToBlueprint(blueprint, "TestFunction");
-		FBlueprintJsonParser::AddBlueprintFunctionFromDescriptor(blueprint, myGraphDescriptor);
+		//FBlueprintJsonParser::AddBlueprintFunctionFromDescriptor(blueprint, myGraphDescriptor);
 		// 6. Mark Blueprint dirty + recompile
 		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(blueprint);
 		FKismetEditorUtilities::CompileBlueprint(blueprint);

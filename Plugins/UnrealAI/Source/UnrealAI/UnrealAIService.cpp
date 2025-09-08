@@ -1298,12 +1298,27 @@ bool UUnrealAIService::ParseBlueprintJSON(const FString& JsonString, TMap<FStrin
 	CleanJsonString = CleanJsonString.Replace(TEXT("\r\n"), TEXT(" "));  // Remove Windows line endings
 	CleanJsonString = CleanJsonString.Replace(TEXT("\n"), TEXT(" "));  // Remove Unix line endings
 	CleanJsonString = CleanJsonString.Replace(TEXT("\t"), TEXT(" "));  // Remove tabs
+
+	// Normalize excessive spaces so we can reliably detect adjacent string tokens
+	while (CleanJsonString.Contains(TEXT("  ")))
+	{
+		CleanJsonString = CleanJsonString.Replace(TEXT("  "), TEXT(" "));
+	}
+
+	// Insert missing commas between adjacent string tokens inside arrays, e.g. "foo" "bar" -> "foo", "bar"
+	CleanJsonString = CleanJsonString.Replace(TEXT("\" \""), TEXT("\", \""));
+
+	// Remove stray pseudo-code tokens that are not valid JSON items
+	CleanJsonString = CleanJsonString.Replace(TEXT("\"End If\""), TEXT(""));
 	
 	// Fix common JSON syntax errors that are safe
 	CleanJsonString = CleanJsonString.Replace(TEXT("], }"), TEXT("] }"));  // Fix extra comma before closing brace
 	CleanJsonString = CleanJsonString.Replace(TEXT("},]"), TEXT("}]"));  // Fix extra comma before closing bracket
 	CleanJsonString = CleanJsonString.Replace(TEXT(", }"), TEXT(" }"));  // Fix comma before closing brace
 	CleanJsonString = CleanJsonString.Replace(TEXT(",]"), TEXT("]"));  // Fix comma before closing bracket
+	// Clean up possible commas left after removing tokens
+	CleanJsonString = CleanJsonString.Replace(TEXT(", }"), TEXT(" }"));
+	CleanJsonString = CleanJsonString.Replace(TEXT(", ]"), TEXT(" ]"));
 	
 	// No more space cleaning - prompt will generate clean JSON
 	

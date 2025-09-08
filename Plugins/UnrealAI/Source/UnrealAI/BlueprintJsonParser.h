@@ -75,7 +75,7 @@ public:
 	FBlueprintJsonParser();
 	~FBlueprintJsonParser();
 
-	bool AddBlueprintFunctionFromDescriptor(UBlueprint* blueprint, const FFunctionGraphDescriptor& graphDesc);
+	static bool AddBlueprintFunctionFromDescriptor(UBlueprint* blueprint, const FFunctionGraphDescriptor& graphDesc);
 
 	/**
 	 * Converts a blueprint to JSON and logs it
@@ -102,6 +102,8 @@ public:
 	 * Converts blueprint info to JSON object
 	 */
 	TSharedPtr<FJsonObject> BlueprintInfoToJson(const FBlueprintInfo& BlueprintInfo);
+
+	void TestAddFunction(UBlueprint* blueprint);
 
 	/**
 	 * Logs JSON object to UE_LOG

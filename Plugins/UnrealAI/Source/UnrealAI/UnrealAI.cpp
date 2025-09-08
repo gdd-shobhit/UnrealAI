@@ -3,6 +3,7 @@
 #include "UnrealAIService.h"
 #include "UnrealAIWidget.h"
 #include "BlueprintJsonParser.h"
+#include "BlueprintDiffService.h"
 #include "Misc/MessageDialog.h"
 #include "ToolMenus.h"
 #include "Framework/Application/SlateApplication.h"
@@ -13,6 +14,8 @@
 #include "Engine/Blueprint.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Engine/ObjectLibrary.h"
+#include "Exporters/Exporter.h"
+#include "Misc/OutputDevice.h"
 
 #define LOCTEXT_NAMESPACE "FUnrealAIModule"
 
@@ -68,6 +71,10 @@ void FUnrealAIModule::PluginButtonClicked()
 	TSharedPtr<FString> CurrentInputText = MakeShareable(new FString());
 	TSharedPtr<FString> CurrentResponseText = MakeShareable(new FString(TEXT("Welcome to UnrealAI Assistant!\n\nThis is a comprehensive AI-powered tool for Unreal Engine development.\n\n🎯 Features:\n• Generate Blueprint code from descriptions\n• Generate C++ code from descriptions\n• Analyze and review existing code\n• General AI queries about Unreal Engine\n• Advanced options for fine-tuning\n• Copy and save responses\n\n📋 How to Use:\n1. Type your prompt in the text area above\n2. Click any of the AI function buttons\n3. See the AI response below\n4. Check the log for detailed processing steps\n\n🚀 Next Steps:\n1. Install Ollama: https://ollama.ai\n2. Run: ollama pull llama2\n3. Start Ollama service\n4. Enable HTTP functionality in the code\n5. Enjoy AI-powered Unreal Engine development!\n\n✅ Status: Plugin compiled successfully!\n✅ Status: All AI functions ready!\n✅ Status: C++ UI system working!")));
 	TSharedPtr<FString> CurrentLogText = MakeShareable(new FString(TEXT("📋 AI Processing Log\n\nReady to process requests...\n\nLog will show:\n• AI response parsing\n• JSON extraction\n• Blueprint creation steps\n• Function generation\n• Error messages")));
+
+	// Separate selections for left/right diff
+	TSharedPtr<FString> SelectedLeftBlueprint = MakeShareable(new FString(TEXT("Select a Blueprint...")));
+	TSharedPtr<FString> SelectedRightBlueprint = MakeShareable(new FString(TEXT("Select a Blueprint...")));
 
 	// Only populate BlueprintOptions if it's empty (first time initialization)
 	if (BlueprintOptions.Num() <= 1)
@@ -529,6 +536,86 @@ void FUnrealAIModule::PluginButtonClicked()
 					.Padding(0, 0, 10, 0)
 					[
 						SNew(STextBlock)
+						.Text(FText::FromString(TEXT("Left Blueprint:")))
+						.Font(FCoreStyle::GetDefaultFontStyle("Normal", 12))
+					]
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.0f)
+					[
+						SNew(SComboBox<TSharedPtr<FString>>)
+						.OptionsSource(&BlueprintOptions)
+						.OnGenerateWidget_Lambda([](TSharedPtr<FString> Item)
+						{
+							return SNew(STextBlock).Text(FText::FromString(*Item));
+						})
+						.OnSelectionChanged_Lambda([SelectedLeftBlueprint, CurrentLogText](TSharedPtr<FString> NewSelection, ESelectInfo::Type)
+						{
+							if (NewSelection.IsValid())
+							{
+								*SelectedLeftBlueprint = *NewSelection;
+								*CurrentLogText = FString::Printf(TEXT("🔧 Left Blueprint Selected: %s\n"), **NewSelection);
+							}
+						})
+						.Content()
+						[
+							SNew(STextBlock)
+							.Text_Lambda([SelectedLeftBlueprint]() -> FText
+							{
+								return FText::FromString(SelectedLeftBlueprint->IsEmpty() ? TEXT("Select a Blueprint...") : *SelectedLeftBlueprint);
+							})
+						]
+					]
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0, 0, 0, 10)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(0, 0, 10, 0)
+					[
+						SNew(STextBlock)
+						.Text(FText::FromString(TEXT("Right Blueprint:")))
+						.Font(FCoreStyle::GetDefaultFontStyle("Normal", 12))
+					]
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.0f)
+					[
+						SNew(SComboBox<TSharedPtr<FString>>)
+						.OptionsSource(&BlueprintOptions)
+						.OnGenerateWidget_Lambda([](TSharedPtr<FString> Item)
+						{
+							return SNew(STextBlock).Text(FText::FromString(*Item));
+						})
+						.OnSelectionChanged_Lambda([SelectedRightBlueprint, CurrentLogText](TSharedPtr<FString> NewSelection, ESelectInfo::Type)
+						{
+							if (NewSelection.IsValid())
+							{
+								*SelectedRightBlueprint = *NewSelection;
+								*CurrentLogText = FString::Printf(TEXT("🔧 Right Blueprint Selected: %s\n"), **NewSelection);
+							}
+						})
+						.Content()
+						[
+							SNew(STextBlock)
+							.Text_Lambda([SelectedRightBlueprint]() -> FText
+							{
+								return FText::FromString(SelectedRightBlueprint->IsEmpty() ? TEXT("Select a Blueprint...") : *SelectedRightBlueprint);
+							})
+						]
+					]
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0, 0, 0, 10)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(0, 0, 10, 0)
+					[
+						SNew(STextBlock)
 						.Text(FText::FromString(TEXT("Select Blueprint:")))
 						.Font(FCoreStyle::GetDefaultFontStyle("Normal", 12))
 					]
@@ -846,6 +933,77 @@ void FUnrealAIModule::PluginButtonClicked()
 					SNew(STextBlock)
 					.Text(FText::FromString(TEXT("Utilities:")))
 					.Font(FCoreStyle::GetDefaultFontStyle("Bold", 14))
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0, 0, 0, 5)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("🧾 Dump Diff Text")))
+					.OnClicked_Lambda([SelectedLeftBlueprint, SelectedRightBlueprint, CurrentResponseText, CurrentLogText]()
+					{
+						*CurrentLogText = TEXT("🧾 Starting Diff Dump...\n");
+						*CurrentLogText += TEXT("📄 Exporting T3D text for selected left/right Blueprints.\n");
+
+						UBlueprint* LeftBP = nullptr;
+						UBlueprint* RightBP = nullptr;
+
+						if (!SelectedLeftBlueprint->IsEmpty() && *SelectedLeftBlueprint != TEXT("Select a Blueprint..."))
+						{
+							LeftBP = FBlueprintDiffService::FindBlueprintByName(*SelectedLeftBlueprint);
+						}
+						if (!SelectedRightBlueprint->IsEmpty() && *SelectedRightBlueprint != TEXT("Select a Blueprint..."))
+						{
+							RightBP = FBlueprintDiffService::FindBlueprintByName(*SelectedRightBlueprint);
+						}
+
+						// Fallbacks
+						if (!LeftBP)
+						{
+							LeftBP = FBlueprintDiffService::FindAnyBlueprint();
+						}
+						if (!RightBP)
+						{
+							RightBP = LeftBP ? LeftBP : FBlueprintDiffService::FindAnyBlueprint();
+						}
+
+						if (!LeftBP || !RightBP)
+						{
+							*CurrentLogText += TEXT("❌ Failed to resolve left/right Blueprints.\n");
+							FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(TEXT("Failed to resolve left/right Blueprints for diff dump.")));
+							return FReply::Handled();
+						}
+
+						FString LeftText;
+						FString RightText;
+						const bool bLeftOk = FBlueprintDiffService::ExportBlueprintT3D(LeftBP, LeftText);
+						const bool bRightOk = FBlueprintDiffService::ExportBlueprintT3D(RightBP, RightText);
+
+						if (!bLeftOk || !bRightOk)
+						{
+							*CurrentLogText += TEXT("❌ Export failed for one or both selections.\n");
+							FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(TEXT("Export failed for one or both Blueprints.")));
+							return FReply::Handled();
+						}
+
+						UE_LOG(LogTemp, Log, TEXT("==================== DIFF DUMP (LEFT) ===================="));
+						UE_LOG(LogTemp, Log, TEXT("%s"), *LeftText);
+						UE_LOG(LogTemp, Log, TEXT("==================== DIFF DUMP (RIGHT) ==================="));
+						UE_LOG(LogTemp, Log, TEXT("%s"), *RightText);
+
+						// Parse to structured data for quick inspection
+						FT3DAssetInfo LeftInfo, RightInfo;
+						FBlueprintDiffService::ParseT3D(LeftText, LeftInfo);
+						FBlueprintDiffService::ParseT3D(RightText, RightInfo);
+						UE_LOG(LogTemp, Log, TEXT("==================== PARSE SUMMARY (LEFT) ===================="));
+						FBlueprintDiffService::LogSummary(LeftInfo);
+						UE_LOG(LogTemp, Log, TEXT("==================== PARSE SUMMARY (RIGHT) ==================="));
+						FBlueprintDiffService::LogSummary(RightInfo);
+
+						*CurrentResponseText = TEXT("🧾 Dumped and parsed T3D for selected Blueprints (left/right). Check Output Log.");
+						*CurrentLogText += TEXT("✅ Diff dump completed. Printed left and right blocks to Output Log.\n");
+						return FReply::Handled();
+					})
 				]
 				+ SVerticalBox::Slot()
 				.AutoHeight()

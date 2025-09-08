@@ -75,7 +75,7 @@ public:
 	FBlueprintJsonParser();
 	~FBlueprintJsonParser();
 
-	bool AddBlueprintFunctionFromDescriptor(UBlueprint* blueprint, const FFunctionGraphDescriptor& graphDesc);
+	static bool AddBlueprintFunctionFromDescriptor(UBlueprint* blueprint, const FFunctionGraphDescriptor& graphDesc);
 
 	/**
 	 * Converts a blueprint to JSON and logs it

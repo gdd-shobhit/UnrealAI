@@ -78,7 +78,15 @@ static bool ParsePinTypeFromJson(const TSharedPtr<FJsonObject>& jsonObj, FEdGrap
     else if (category.Equals(TEXT("Bool"), ESearchCase::IgnoreCase))
         outPinType.PinCategory = UEdGraphSchema_K2::PC_Boolean;
     else if (category.Equals(TEXT("Vector"), ESearchCase::IgnoreCase))
-        outPinType.PinCategory = UEdGraphSchema_K2::PC_Struct, outPinType.PinSubCategory = UEdGraphSchema_K2::PC_Struct.ToString(); // fallback, will set object below
+    {
+        outPinType.PinCategory = UEdGraphSchema_K2::PC_Struct;
+        // Set the struct type to Vector
+        UScriptStruct* VectorStruct = TBaseStructure<FVector>::Get();
+        if (VectorStruct)
+        {
+            outPinType.PinSubCategoryObject = VectorStruct;
+        }
+    }
     else if (category.Equals(TEXT("Object"), ESearchCase::IgnoreCase))
         outPinType.PinCategory = UEdGraphSchema_K2::PC_Object;
     else if (category.Equals(TEXT("Struct"), ESearchCase::IgnoreCase))
@@ -106,7 +114,7 @@ static bool ParsePinTypeFromJson(const TSharedPtr<FJsonObject>& jsonObj, FEdGrap
         {
             // If path failed, try to find by class name only
             FString className = FPackageName::ObjectPathToObjectName(subObjPath);
-            UClass* foundClass = FindObject<UClass>(ANY_PACKAGE, *className);
+            UClass* foundClass = FindObject<UClass>(nullptr, *className);
             if (foundClass)
             {
                 outPinType.PinSubCategoryObject = foundClass;
@@ -177,7 +185,8 @@ bool FBlueprintJsonParser::ParseFunctionGraphDescriptorFromJson(const FString& j
             FEdGraphPinType pinType;
             if (ParsePinTypeFromJson(varObj, pinType))
             {
-                outDesc.variables.Add(TPair<FName, FEdGraphPinType>(TEXT("Test_%s", pinType), pinType));
+                FString varNameStr = FString::Printf(TEXT("Var_%d"), outDesc.variables.Num());
+                outDesc.variables.Add(TPair<FName, FEdGraphPinType>(FName(*varNameStr), pinType));
             }
         }
     }
@@ -447,7 +456,7 @@ bool FBlueprintJsonParser::AddVariablesToBlueprint(UBlueprint* blueprint, const 
 	{
 		const FEdGraphPinType& varType = variables[i].Value;
 		// Create a stable but readable name — you can change this policy
-		FName varName = *FString::Printf(variables[i].Key);
+		FName varName = variables[i].Key;
 		if (!FBlueprintEditorUtils::AddMemberVariable(blueprint, varName, varType))
 		{
 			UE_LOG(LogTemp, Warning, TEXT("Failed to add member variable %s"), *varName.ToString());
@@ -474,7 +483,7 @@ bool FBlueprintJsonParser::CreateNodesFromDescriptors(UEdGraph* functionGraph, c
 			{
 				// fallback to find UClass by name (strip package prefix)
 				FString className = FPackageName::ObjectPathToObjectName(desc.nodeClassPath);
-				nodeClass = FindObject<UClass>(ANY_PACKAGE, *className);
+				nodeClass = FindObject<UClass>(nullptr, *className);
 			}
 		}
 
@@ -539,8 +548,8 @@ bool FBlueprintJsonParser::ConnectNodesFromDescriptor(UEdGraph* functionGraph, c
 
 	for (const FNodeConnection& conn : connections)
 	{
-		const UEdGraphNode** fromNodePtr = guidToNodeMap.Find(conn.from.nodeId);
-		const UEdGraphNode** toNodePtr = guidToNodeMap.Find(conn.to.nodeId);
+		UEdGraphNode** fromNodePtr = guidToNodeMap.Find(conn.from.nodeId);
+		UEdGraphNode** toNodePtr = guidToNodeMap.Find(conn.to.nodeId);
 
 		if (!fromNodePtr || !toNodePtr)
 		{
@@ -549,8 +558,8 @@ bool FBlueprintJsonParser::ConnectNodesFromDescriptor(UEdGraph* functionGraph, c
 			continue;
 		}
 
-		UEdGraphNode* fromNode = const_cast<UEdGraphNode*>(*fromNodePtr);
-		UEdGraphNode* toNode = const_cast<UEdGraphNode*>(*toNodePtr);
+		UEdGraphNode* fromNode = *fromNodePtr;
+		UEdGraphNode* toNode = *toNodePtr;
 
 		// Resolve pins
 		UEdGraphPin* outPin = ResolvePinByNameOrType(fromNode, conn.from, nullptr);
@@ -838,7 +847,7 @@ void FBlueprintJsonParser::AddFunctionToBlueprint(UBlueprint* blueprint,
 	// 2. Add variables
 	for (const TPair<FName, FEdGraphPinType>& var : variables)
 	{
-		FName varName = *FString::Printf(var.Key);
+		FName varName = var.Key;
 		FBlueprintEditorUtils::AddMemberVariable(blueprint, varName, var.Value);
 	}
 

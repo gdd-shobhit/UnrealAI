@@ -69,6 +69,9 @@ void FUnrealAIModule::PluginButtonClicked()
 	TSharedPtr<FString> CurrentResponseText = MakeShareable(new FString(TEXT("Welcome to UnrealAI Assistant!\n\nThis is a comprehensive AI-powered tool for Unreal Engine development.\n\n🎯 Features:\n• Generate Blueprint code from descriptions\n• Generate C++ code from descriptions\n• Analyze and review existing code\n• General AI queries about Unreal Engine\n• Advanced options for fine-tuning\n• Copy and save responses\n\n📋 How to Use:\n1. Type your prompt in the text area above\n2. Click any of the AI function buttons\n3. See the AI response below\n4. Check the log for detailed processing steps\n\n🚀 Next Steps:\n1. Install Ollama: https://ollama.ai\n2. Run: ollama pull llama2\n3. Start Ollama service\n4. Enable HTTP functionality in the code\n5. Enjoy AI-powered Unreal Engine development!\n\n✅ Status: Plugin compiled successfully!\n✅ Status: All AI functions ready!\n✅ Status: C++ UI system working!")));
 	TSharedPtr<FString> CurrentLogText = MakeShareable(new FString(TEXT("📋 AI Processing Log\n\nReady to process requests...\n\nLog will show:\n• AI response parsing\n• JSON extraction\n• Blueprint creation steps\n• Function generation\n• Error messages")));
 
+	// Provider selection state
+	TSharedPtr<FString> SelectedProvider = MakeShareable(new FString(TEXT("Local LLM")));
+
 	// Only populate BlueprintOptions if it's empty (first time initialization)
 	if (BlueprintOptions.Num() <= 1)
 	{
@@ -195,6 +198,45 @@ void FUnrealAIModule::PluginButtonClicked()
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot()
 				.AutoHeight()
+				.Padding(0, 0, 0, 8)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(0, 0, 10, 0)
+					[
+						SNew(STextBlock)
+						.Text(FText::FromString(TEXT("Provider:")))
+						.Font(FCoreStyle::GetDefaultFontStyle("Normal", 12))
+					]
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.0f)
+					[
+						SNew(SComboBox<TSharedPtr<FString>>)
+						.OptionsSource(&ProviderOptions)
+						.OnGenerateWidget_Lambda([](TSharedPtr<FString> Item)
+						{
+							return SNew(STextBlock).Text(FText::FromString(*Item));
+						})
+						.OnSelectionChanged_Lambda([SelectedProvider](TSharedPtr<FString> NewSelection, ESelectInfo::Type)
+						{
+							if (NewSelection.IsValid())
+							{
+								*SelectedProvider = *NewSelection;
+							}
+						})
+						.Content()
+						[
+							SNew(STextBlock)
+							.Text_Lambda([SelectedProvider]() -> FText
+							{
+								return FText::FromString(*SelectedProvider);
+							})
+						]
+					]
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
 				.Padding(0, 0, 0, 10)
 				[
 					SNew(STextBlock)
@@ -207,7 +249,7 @@ void FUnrealAIModule::PluginButtonClicked()
 				[
 					SNew(SButton)
 					.Text(FText::FromString(TEXT("🔧 Generate Blueprint")))
-					.OnClicked_Lambda([CurrentInputText, CurrentResponseText, CurrentLogText]()
+					.OnClicked_Lambda([CurrentInputText, CurrentResponseText, CurrentLogText, SelectedProvider]()
 					{
 						if (CurrentInputText->IsEmpty())
 						{
@@ -231,7 +273,8 @@ void FUnrealAIModule::PluginButtonClicked()
 						FAIRequest Request;
 						Request.Prompt = **CurrentInputText;
 						Request.RequestType = EAIRequestType::BlueprintGeneration;
-						Request.Provider = EAIProvider::LocalLLM;
+						// Map provider selection
+						if (*SelectedProvider == TEXT("Claude API")) Request.Provider = EAIProvider::Claude; else if (*SelectedProvider == TEXT("OpenAI API")) Request.Provider = EAIProvider::OpenAI; else Request.Provider = EAIProvider::LocalLLM;
 
 						// Send the async request
 						AIService->ProcessRequestAsync(Request, [CurrentResponseText, CurrentLogText](const FAIResponse& Response)
@@ -266,7 +309,7 @@ void FUnrealAIModule::PluginButtonClicked()
 				[
 					SNew(SButton)
 					.Text(FText::FromString(TEXT("💻 Generate C++")))
-					.OnClicked_Lambda([CurrentInputText, CurrentResponseText, CurrentLogText]()
+					.OnClicked_Lambda([CurrentInputText, CurrentResponseText, CurrentLogText, SelectedProvider]()
 					{
 						if (CurrentInputText->IsEmpty())
 						{
@@ -290,7 +333,7 @@ void FUnrealAIModule::PluginButtonClicked()
 						FAIRequest Request;
 						Request.Prompt = **CurrentInputText;
 						Request.RequestType = EAIRequestType::CPPGeneration;
-						Request.Provider = EAIProvider::LocalLLM;
+						if (*SelectedProvider == TEXT("Claude API")) Request.Provider = EAIProvider::Claude; else if (*SelectedProvider == TEXT("OpenAI API")) Request.Provider = EAIProvider::OpenAI; else Request.Provider = EAIProvider::LocalLLM;
 
 						// Send the async request
 						AIService->ProcessRequestAsync(Request, [CurrentResponseText, CurrentLogText](const FAIResponse& Response)
@@ -321,7 +364,7 @@ void FUnrealAIModule::PluginButtonClicked()
 				[
 					SNew(SButton)
 					.Text(FText::FromString(TEXT("🔍 Analyze Code")))
-					.OnClicked_Lambda([CurrentInputText, CurrentResponseText, CurrentLogText]()
+					.OnClicked_Lambda([CurrentInputText, CurrentResponseText, CurrentLogText, SelectedProvider]()
 					{
 						if (CurrentInputText->IsEmpty())
 						{
@@ -345,7 +388,7 @@ void FUnrealAIModule::PluginButtonClicked()
 						FAIRequest Request;
 						Request.Prompt = **CurrentInputText;
 						Request.RequestType = EAIRequestType::CodeReview;
-						Request.Provider = EAIProvider::LocalLLM;
+						if (*SelectedProvider == TEXT("Claude API")) Request.Provider = EAIProvider::Claude; else if (*SelectedProvider == TEXT("OpenAI API")) Request.Provider = EAIProvider::OpenAI; else Request.Provider = EAIProvider::LocalLLM;
 
 						// Send the async request
 						AIService->ProcessRequestAsync(Request, [CurrentResponseText, CurrentLogText](const FAIResponse& Response)
@@ -401,8 +444,7 @@ void FUnrealAIModule::PluginButtonClicked()
 						FAIRequest Request;
 						Request.Prompt = **CurrentInputText;
 						Request.RequestType = EAIRequestType::General;
-						Request.Provider = EAIProvider::LocalLLM;
-
+						
 						// Send the async request
 						AIService->ProcessRequestAsync(Request, [CurrentResponseText, CurrentLogText](const FAIResponse& Response)
 						{

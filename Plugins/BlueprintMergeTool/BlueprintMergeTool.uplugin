@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "Blueprint Merge Tool",
+	"Description": "Advanced Blueprint merging and diffing tool with three-way merge support",
+	"Category": "Developer Tools",
+	"CreatedBy": "UnrealAI Team",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "BlueprintMergeTool",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}

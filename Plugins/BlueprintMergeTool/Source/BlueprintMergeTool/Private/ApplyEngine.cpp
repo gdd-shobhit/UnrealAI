@@ -1,4 +1,6 @@
 #include "../Public/ApplyEngine.h"
+#include "../Public/SnapshotManager.h"
+#include "../Public/BlueprintDataStructures.h"
 #include "Engine/Blueprint.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
@@ -308,7 +310,7 @@ bool FApplyEngine::ValidateBlueprintIntegrity(
 
 	// Check graph integrity
 	TArray<UEdGraph*> AllGraphs;
-	Blueprint->GetAllGraphs(AllGraphs);
+	FSnapshotManager::GetAllBlueprintGraphs(Blueprint, AllGraphs);
 
 	for (UEdGraph* Graph : AllGraphs)
 	{
@@ -462,6 +464,8 @@ bool FApplyEngine::AddVariable(
 	FString VarGuidStr = VariableData->GetStringField(TEXT("VariableGuid"));
 	FString VarType = VariableData->GetStringField(TEXT("VarType"));
 
+	UE_LOG(LogTemp, Log, TEXT("ApplyEngine: AddVariable - Name: %s, GUID: %s, Type: %s"), *VarName, *VarGuidStr, *VarType);
+
 	if (VarName.IsEmpty())
 	{
 		OutError = TEXT("Variable name is empty");
@@ -492,29 +496,64 @@ bool FApplyEngine::AddVariable(
 		NewVariable.VarGuid = FGuid::NewGuid();
 	}
 
-	// Set variable type
-	NewVariable.VarType.PinCategory = FName(*VarType);
-	if (VarType == TEXT("int") || VarType == TEXT("Int"))
+	// Get subcategory from the captured data
+	FString VarSubCategory = VariableData->GetStringField(TEXT("VarSubCategory"));
+	
+	// Set variable type with proper subcategory
+	// Handle both user-friendly names and Unreal Engine pin categories
+	if (VarType == TEXT("int") || VarType == TEXT("Int") || VarType == TEXT("PC_Int"))
 	{
 		NewVariable.VarType.PinCategory = UEdGraphSchema_K2::PC_Int;
+		NewVariable.VarType.PinSubCategory = NAME_None;
 	}
-	else if (VarType == TEXT("float") || VarType == TEXT("Float"))
+	else if (VarType == TEXT("float") || VarType == TEXT("Float") || VarType == TEXT("PC_Real"))
 	{
-		NewVariable.VarType.PinCategory = UEdGraphSchema_K2::PC_Float;
+		NewVariable.VarType.PinCategory = UEdGraphSchema_K2::PC_Real;
+		NewVariable.VarType.PinSubCategory = VarSubCategory == TEXT("PC_Float") ? UEdGraphSchema_K2::PC_Float : NAME_None;
 	}
-	else if (VarType == TEXT("bool") || VarType == TEXT("Boolean"))
+	else if (VarType == TEXT("bool") || VarType == TEXT("Boolean") || VarType == TEXT("PC_Boolean"))
 	{
 		NewVariable.VarType.PinCategory = UEdGraphSchema_K2::PC_Boolean;
+		NewVariable.VarType.PinSubCategory = NAME_None;
 	}
-	else if (VarType == TEXT("string") || VarType == TEXT("String"))
+	else if (VarType == TEXT("string") || VarType == TEXT("String") || VarType == TEXT("PC_String"))
 	{
 		NewVariable.VarType.PinCategory = UEdGraphSchema_K2::PC_String;
+		NewVariable.VarType.PinSubCategory = NAME_None;
+	}
+	else
+	{
+		// Try to use the captured pin category directly
+		NewVariable.VarType.PinCategory = FName(*VarType);
+		NewVariable.VarType.PinSubCategory = VarSubCategory.IsEmpty() ? NAME_None : FName(*VarSubCategory);
+		
+		UE_LOG(LogTemp, Log, TEXT("ApplyEngine: Using captured pin type - Category: %s, SubCategory: %s"), *VarType, *VarSubCategory);
 	}
 
 	// Set other properties
 	NewVariable.Category = FText::FromString(VariableData->GetStringField(TEXT("Category")));
 	NewVariable.FriendlyName = VariableData->GetStringField(TEXT("FriendlyName"));
-	NewVariable.MetaDataArray[NewVariable.FindMetaDataEntryIndexForKey(TEXT("Tooltip"))].DataValue = VariableData->GetStringField(TEXT("Tooltip"));
+	
+	// Safely set tooltip metadata
+	FString TooltipValue = VariableData->GetStringField(TEXT("Tooltip"));
+	if (!TooltipValue.IsEmpty())
+	{
+		int32 TooltipIndex = NewVariable.FindMetaDataEntryIndexForKey(TEXT("Tooltip"));
+		if (TooltipIndex == INDEX_NONE)
+		{
+			// Add new tooltip metadata entry
+			FBPVariableMetaDataEntry TooltipEntry;
+			TooltipEntry.DataKey = TEXT("Tooltip");
+			TooltipEntry.DataValue = TooltipValue;
+			NewVariable.MetaDataArray.Add(TooltipEntry);
+		}
+		else
+		{
+			// Update existing tooltip metadata entry
+			NewVariable.MetaDataArray[TooltipIndex].DataValue = TooltipValue;
+		}
+	}
+	
 	NewVariable.DefaultValue = VariableData->GetStringField(TEXT("DefaultValue"));
 
 	// Set flags
@@ -527,20 +566,16 @@ bool FApplyEngine::AddVariable(
 	if (VariableData->GetBoolField(TEXT("bBlueprintVisible")))
 		NewVariable.PropertyFlags |= CPF_BlueprintVisible;
 
-	// Add the variable
-	FBlueprintEditorUtils::AddMemberVariable(Blueprint, NewVariable.VarName, NewVariable.VarType, NewVariable.DefaultValue);
+	// Add the variable directly to the Blueprint's NewVariables array
+	Blueprint->NewVariables.Add(NewVariable);
 	
-	// Update the variable description with additional properties
-	for (FBPVariableDescription& Var : Blueprint->NewVariables)
-	{
-		if (Var.VarName == NewVariable.VarName)
-		{
-			Var = NewVariable;
-			break;
-		}
-	}
-
-	UE_LOG(LogTemp, VeryVerbose, TEXT("Added variable: %s (%s)"), *VarName, *VarType);
+	// Mark the Blueprint as modified
+	Blueprint->Modify();
+	
+	// Compile the Blueprint to ensure the variable is properly integrated
+	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+	
+	UE_LOG(LogTemp, Log, TEXT("ApplyEngine: Successfully added variable: %s (%s)"), *VarName, *VarType);
 	return true;
 }
 
@@ -1122,7 +1157,7 @@ UEdGraph* FApplyEngine::FindGraphByName(UBlueprint* Blueprint, const FString& Gr
 	}
 
 	TArray<UEdGraph*> AllGraphs;
-	Blueprint->GetAllGraphs(AllGraphs);
+	FSnapshotManager::GetAllBlueprintGraphs(Blueprint, AllGraphs);
 
 	for (UEdGraph* Graph : AllGraphs)
 	{
@@ -1398,9 +1433,9 @@ bool FApplyEngine::UpdateVariableReferences(
 		}
 	};
 
-	for (UEdGraph* Graph : Blueprint->UbergraphPages) { UpdateGraphNodes(Graph); }
-	for (UEdGraph* Graph : Blueprint->FunctionGraphs) { UpdateGraphNodes(Graph); }
-	for (UEdGraph* Graph : Blueprint->MacroGraphs) { UpdateGraphNodes(Graph); }
+	TArray<UEdGraph*> AllGraphs;
+	FSnapshotManager::GetAllBlueprintGraphs(Blueprint, AllGraphs);
+	for (UEdGraph* Graph : AllGraphs) { UpdateGraphNodes(Graph); }
 
 	UE_LOG(LogTemp, VeryVerbose, TEXT("Updated %d variable references for GUID remap: %s -> %s"), 
 		UpdateCount, *OldGuid, *NewGuid);
@@ -1469,4 +1504,214 @@ void FApplyEngine::RefreshBlueprintEditor(UBlueprint* Blueprint)
 	// Use standard refresh/compile path compatible with UE5
 	FKismetEditorUtilities::CompileBlueprint(Blueprint);
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+}
+
+bool FApplyEngine::ApplyStructuredData(
+	UBlueprint* TargetBlueprint,
+	const FBlueprintMergeData& BlueprintData,
+	FApplyResult& OutResult)
+{
+	if (!TargetBlueprint)
+	{
+		OutResult.bSuccess = false;
+		OutResult.ErrorMessage = TEXT("Target Blueprint is null");
+		return false;
+	}
+
+	if (!IsValid(TargetBlueprint))
+	{
+		OutResult.bSuccess = false;
+		OutResult.ErrorMessage = TEXT("Target Blueprint is not valid");
+		return false;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("ApplyEngine: Applying structured data to Blueprint: %s"), *TargetBlueprint->GetName());
+	UE_LOG(LogTemp, Log, TEXT("ApplyEngine: Variables to apply: %d, Graphs to apply: %d"), 
+		BlueprintData.Variables.Num(), BlueprintData.Graphs.Num());
+
+	// Ensure we're on the game thread
+	if (!IsInGameThread())
+	{
+		UE_LOG(LogTemp, Error, TEXT("ApplyEngine: Must be called from game thread"));
+		OutResult.bSuccess = false;
+		OutResult.ErrorMessage = TEXT("Operations must be applied from the game thread");
+		return false;
+	}
+
+	// Validate custom class availability first
+	TArray<FString> MissingClasses;
+	if (!ValidateCustomClassAvailability(BlueprintData, MissingClasses))
+	{
+		OutResult.bSuccess = false;
+		OutResult.ErrorMessage = FString::Printf(TEXT("Missing custom classes: %s"), 
+			*FString::Join(MissingClasses, TEXT(", ")));
+		UE_LOG(LogTemp, Error, TEXT("ApplyEngine: Cannot apply merge - missing custom classes"));
+		return false;
+	}
+
+	// Start a transaction for undo support
+	FScopedTransaction Transaction(FText::FromString(TEXT("Apply Blueprint Merge")));
+
+	try
+	{
+		// Apply variables
+		for (const FBlueprintMergeVariableData& VariableData : BlueprintData.Variables)
+		{
+			FString ErrorMessage;
+			if (AddVariableFromStructuredData(TargetBlueprint, VariableData, ErrorMessage))
+			{
+				OutResult.AppliedOperations.Add(FString::Printf(TEXT("Added variable: %s"), *VariableData.VariableName.ToString()));
+			}
+			else
+			{
+				OutResult.FailedOperations.Add(FString::Printf(TEXT("Failed to add variable %s: %s"), 
+					*VariableData.VariableName.ToString(), *ErrorMessage));
+			}
+		}
+
+		// Apply graphs and nodes
+		for (const FBlueprintMergeGraphData& GraphData : BlueprintData.Graphs)
+		{
+			FString ErrorMessage;
+			if (AddGraphFromStructuredData(TargetBlueprint, GraphData, ErrorMessage))
+			{
+				OutResult.AppliedOperations.Add(FString::Printf(TEXT("Added graph: %s"), *GraphData.GraphName));
+			}
+			else
+			{
+				OutResult.FailedOperations.Add(FString::Printf(TEXT("Failed to add graph %s: %s"), 
+					*GraphData.GraphName, *ErrorMessage));
+			}
+		}
+
+		// Mark Blueprint as modified
+		TargetBlueprint->Modify();
+		FBlueprintEditorUtils::MarkBlueprintAsModified(TargetBlueprint);
+
+		// Compile the Blueprint
+		FKismetEditorUtilities::CompileBlueprint(TargetBlueprint, EBlueprintCompileOptions::None);
+		OutResult.bBlueprintCompiled = true;
+
+		// Save the Blueprint
+		if (UEditorAssetSubsystem* EditorAssetSubsystem = GEditor->GetEditorSubsystem<UEditorAssetSubsystem>())
+		{
+			OutResult.bBlueprintSaved = EditorAssetSubsystem->SaveAsset(TargetBlueprint->GetPathName());
+		}
+		else
+		{
+			OutResult.bBlueprintSaved = false;
+		}
+
+		OutResult.bSuccess = OutResult.FailedOperations.Num() == 0;
+		
+		UE_LOG(LogTemp, Log, TEXT("ApplyEngine: Structured data application completed. Applied: %d, Failed: %d"), 
+			OutResult.AppliedOperations.Num(), OutResult.FailedOperations.Num());
+
+		return OutResult.bSuccess;
+	}
+	catch (const std::exception& e)
+	{
+		OutResult.bSuccess = false;
+		OutResult.ErrorMessage = FString::Printf(TEXT("Exception during structured data application: %s"), ANSI_TO_TCHAR(e.what()));
+		UE_LOG(LogTemp, Error, TEXT("ApplyEngine: %s"), *OutResult.ErrorMessage);
+		return false;
+	}
+}
+
+bool FApplyEngine::AddVariableFromStructuredData(
+	UBlueprint* Blueprint,
+	const FBlueprintMergeVariableData& VariableData,
+	FString& OutError)
+{
+	if (!Blueprint)
+	{
+		OutError = TEXT("Blueprint is null");
+		return false;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("ApplyEngine: Adding variable from structured data - Name: %s, Type: %s"), 
+		*VariableData.VariableName.ToString(), *VariableData.VarType.PinCategory.ToString());
+
+	// Check if variable already exists
+	for (const FBPVariableDescription& ExistingVar : Blueprint->NewVariables)
+	{
+		if (ExistingVar.VarName == VariableData.VariableName)
+		{
+			OutError = FString::Printf(TEXT("Variable '%s' already exists"), *VariableData.VariableName.ToString());
+			return false;
+		}
+	}
+
+	// Convert structured data to FBPVariableDescription
+	FBPVariableDescription NewVariable = VariableData.ToVariableDescription();
+
+	// Add the variable directly to the Blueprint's NewVariables array
+	Blueprint->NewVariables.Add(NewVariable);
+
+	UE_LOG(LogTemp, Log, TEXT("ApplyEngine: Successfully added variable from structured data: %s"), *VariableData.VariableName.ToString());
+	return true;
+}
+
+bool FApplyEngine::AddGraphFromStructuredData(
+	UBlueprint* Blueprint,
+	const FBlueprintMergeGraphData& GraphData,
+	FString& OutError)
+{
+	if (!Blueprint)
+	{
+		OutError = TEXT("Blueprint is null");
+		return false;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("ApplyEngine: Adding graph from structured data - Name: %s, Type: %s"), 
+		*GraphData.GraphName, *GraphData.GraphType);
+
+	// For now, we'll focus on variables. Graph/node creation is more complex and would require
+	// more detailed implementation. This is a placeholder for future enhancement.
+	
+	UE_LOG(LogTemp, Warning, TEXT("ApplyEngine: Graph creation from structured data not yet implemented: %s"), *GraphData.GraphName);
+	return true;
+}
+
+bool FApplyEngine::ValidateCustomClassAvailability(
+	const FBlueprintMergeData& BlueprintData,
+	TArray<FString>& OutMissingClasses)
+{
+	OutMissingClasses.Empty();
+	
+	UE_LOG(LogTemp, Log, TEXT("ApplyEngine: Validating custom class availability..."));
+	
+	// Check all graphs for custom class references
+	for (const FBlueprintMergeGraphData& GraphData : BlueprintData.Graphs)
+	{
+		for (const FBlueprintMergeNodeData& NodeData : GraphData.Nodes)
+		{
+			// Check function class references
+			if (!NodeData.FunctionClassPath.IsEmpty())
+			{
+				UClass* FoundClass = FindObject<UClass>(nullptr, *NodeData.FunctionClassPath);
+				if (!FoundClass)
+				{
+					OutMissingClasses.AddUnique(NodeData.FunctionClassPath);
+					UE_LOG(LogTemp, Warning, TEXT("ApplyEngine: Missing custom class: %s"), *NodeData.FunctionClassPath);
+				}
+			}
+			
+			// Check custom references
+			for (const auto& RefPair : NodeData.CustomReferences)
+			{
+				UClass* FoundClass = FindObject<UClass>(nullptr, *RefPair.Value);
+				if (!FoundClass)
+				{
+					OutMissingClasses.AddUnique(RefPair.Value);
+					UE_LOG(LogTemp, Warning, TEXT("ApplyEngine: Missing custom reference: %s"), *RefPair.Value);
+				}
+			}
+		}
+	}
+	
+	bool bAllClassesAvailable = OutMissingClasses.Num() == 0;
+	UE_LOG(LogTemp, Log, TEXT("ApplyEngine: Custom class validation complete. Missing: %d classes"), OutMissingClasses.Num());
+	
+	return bAllClassesAvailable;
 }

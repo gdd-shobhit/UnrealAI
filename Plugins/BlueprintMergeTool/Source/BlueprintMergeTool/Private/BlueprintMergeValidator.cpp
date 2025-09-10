@@ -250,9 +250,7 @@ bool FBlueprintMergeValidator::ValidateMergePlan(
 
 	// Check if target Blueprint can accommodate the changes
 	TArray<UEdGraph*> AllGraphs;
-	AllGraphs.Append(TargetBlueprint->UbergraphPages);
-	AllGraphs.Append(TargetBlueprint->FunctionGraphs);
-	AllGraphs.Append(TargetBlueprint->MacroGraphs);
+	FSnapshotManager::GetAllBlueprintGraphs(TargetBlueprint, AllGraphs);
 
 	for (const FMergeOperation& Op : MergePlan.AutoResolvedOperations)
 	{
@@ -621,9 +619,7 @@ bool FBlueprintMergeValidator::ValidateGraphIntegrity(UBlueprint* Blueprint, TAr
 	}
 
 	TArray<UEdGraph*> AllGraphs;
-	AllGraphs.Append(Blueprint->UbergraphPages);
-	AllGraphs.Append(Blueprint->FunctionGraphs);
-	AllGraphs.Append(Blueprint->MacroGraphs);
+	FSnapshotManager::GetAllBlueprintGraphs(Blueprint, AllGraphs);
 
 	bool bIsValid = true;
 
@@ -792,9 +788,7 @@ bool FBlueprintMergeValidator::ValidateGuidUniqueness(UBlueprint* Blueprint, TAr
 
 	// Check node GUIDs
 	TArray<UEdGraph*> AllGraphs;
-	AllGraphs.Append(Blueprint->UbergraphPages);
-	AllGraphs.Append(Blueprint->FunctionGraphs);
-	AllGraphs.Append(Blueprint->MacroGraphs);
+	FSnapshotManager::GetAllBlueprintGraphs(Blueprint, AllGraphs);
 
 	for (UEdGraph* Graph : AllGraphs)
 	{
@@ -838,9 +832,7 @@ bool FBlueprintMergeValidator::RunPerformanceChecks(UBlueprint* Blueprint, TArra
 	}
 
 	TArray<UEdGraph*> AllGraphs;
-	AllGraphs.Append(Blueprint->UbergraphPages);
-	AllGraphs.Append(Blueprint->FunctionGraphs);
-	AllGraphs.Append(Blueprint->MacroGraphs);
+	FSnapshotManager::GetAllBlueprintGraphs(Blueprint, AllGraphs);
 
 	for (UEdGraph* Graph : AllGraphs)
 	{

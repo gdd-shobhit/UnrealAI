@@ -71,6 +71,51 @@ bool FDiffEngine::PerformThreeWayDiff(
 
 	UE_LOG(LogTemp, Log, TEXT("DiffEngine: Three-way diff completed. Operations: %d, Conflicts: %d"), 
 		OutResult.Operations.Num(), OutResult.Conflicts.Num());
+	
+	// Log detailed operation information
+	for (int32 i = 0; i < OutResult.Operations.Num(); i++)
+	{
+		const FMergeOperation& Op = OutResult.Operations[i];
+		FString OpTypeName = TEXT("Unknown");
+		switch (Op.OperationType)
+		{
+		case EMergeOperationType::AddNode: OpTypeName = TEXT("AddNode"); break;
+		case EMergeOperationType::RemoveNode: OpTypeName = TEXT("RemoveNode"); break;
+		case EMergeOperationType::UpdateNodeProperty: OpTypeName = TEXT("UpdateNodeProperty"); break;
+		case EMergeOperationType::AddVariable: OpTypeName = TEXT("AddVariable"); break;
+		case EMergeOperationType::RemoveVariable: OpTypeName = TEXT("RemoveVariable"); break;
+		case EMergeOperationType::UpdateVariable: OpTypeName = TEXT("UpdateVariable"); break;
+		case EMergeOperationType::LinkPins: OpTypeName = TEXT("LinkPins"); break;
+		case EMergeOperationType::UnlinkPins: OpTypeName = TEXT("UnlinkPins"); break;
+		case EMergeOperationType::AddComponent: OpTypeName = TEXT("AddComponent"); break;
+		case EMergeOperationType::RemoveComponent: OpTypeName = TEXT("RemoveComponent"); break;
+		case EMergeOperationType::UpdateComponent: OpTypeName = TEXT("UpdateComponent"); break;
+		}
+		
+		// Get data from AdditionalData based on operation type
+		FString DataKey = TEXT("");
+		if (Op.OperationType == EMergeOperationType::AddVariable)
+		{
+			DataKey = TEXT("VariableData");
+		}
+		else if (Op.OperationType == EMergeOperationType::AddNode)
+		{
+			DataKey = TEXT("NodeData");
+		}
+		
+		FString OperationData = DataKey.IsEmpty() ? TEXT("") : Op.AdditionalData.FindRef(DataKey);
+		int32 DataLength = OperationData.Len();
+		
+		UE_LOG(LogTemp, Log, TEXT("DiffEngine: Operation %d - Type: %s, TargetId: %s, TargetGraph: %s, DataLength: %d"), 
+			i, *OpTypeName, *Op.TargetId, *Op.TargetGraph, DataLength);
+		
+		// Log first 200 characters of data for debugging
+		if (DataLength > 0)
+		{
+			FString DataPreview = DataLength > 200 ? OperationData.Left(200) + TEXT("...") : OperationData;
+			UE_LOG(LogTemp, Log, TEXT("DiffEngine: Operation %d Data Preview: %s"), i, *DataPreview);
+		}
+	}
 
 	return true;
 }
@@ -285,14 +330,26 @@ void FDiffEngine::DiffVariables(
 		if (!BaseVar.IsValid() && LocalVar.IsValid() && !RemoteVar.IsValid())
 		{
 			FMergeOperation Op = CreateOperation(EMergeOperationType::AddVariable, TEXT(""), VarGuid);
-			Op.AdditionalData.Add(TEXT("VariableData"), TEXT("LocalAdd"));
+			// Store the actual variable data for the Apply Engine
+			FString VariableDataString;
+			TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&VariableDataString);
+			FJsonSerializer::Serialize(LocalVar.ToSharedRef(), Writer);
+			Op.AdditionalData.Add(TEXT("VariableData"), VariableDataString);
+			
+			UE_LOG(LogTemp, Log, TEXT("DiffEngine: AddVariable (Local) - GUID: %s, Data: %s"), *VarGuid, *VariableDataString);
 			OutOperations.Add(Op);
 		}
 		// Variable added in remote only
 		else if (!BaseVar.IsValid() && !LocalVar.IsValid() && RemoteVar.IsValid())
 		{
 			FMergeOperation Op = CreateOperation(EMergeOperationType::AddVariable, TEXT(""), VarGuid);
-			Op.AdditionalData.Add(TEXT("VariableData"), TEXT("RemoteAdd"));
+			// Store the actual variable data for the Apply Engine
+			FString VariableDataString;
+			TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&VariableDataString);
+			FJsonSerializer::Serialize(RemoteVar.ToSharedRef(), Writer);
+			Op.AdditionalData.Add(TEXT("VariableData"), VariableDataString);
+			
+			UE_LOG(LogTemp, Log, TEXT("DiffEngine: AddVariable (Remote) - GUID: %s, Data: %s"), *VarGuid, *VariableDataString);
 			OutOperations.Add(Op);
 		}
 		// Variable added in both (conflict)
@@ -314,8 +371,15 @@ void FDiffEngine::DiffVariables(
 			}
 			else
 			{
-				// Same variable added in both, just add once
+				// Same variable added in both, just add once (use local version)
 				FMergeOperation Op = CreateOperation(EMergeOperationType::AddVariable, TEXT(""), VarGuid);
+				// Store the actual variable data for the Apply Engine
+				FString VariableDataString;
+				TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&VariableDataString);
+				FJsonSerializer::Serialize(LocalVar.ToSharedRef(), Writer);
+				Op.AdditionalData.Add(TEXT("VariableData"), VariableDataString);
+				
+				UE_LOG(LogTemp, Log, TEXT("DiffEngine: AddVariable (Both) - GUID: %s, Data: %s"), *VarGuid, *VariableDataString);
 				OutOperations.Add(Op);
 			}
 		}
@@ -526,12 +590,26 @@ void FDiffEngine::DiffNodes(
 		if (!BaseNode.IsValid() && LocalNode.IsValid() && !RemoteNode.IsValid())
 		{
 			FMergeOperation Op = CreateOperation(EMergeOperationType::AddNode, GraphName, NodeGuid);
+			// Store the actual node data for the Apply Engine
+			FString NodeDataString;
+			TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&NodeDataString);
+			FJsonSerializer::Serialize(LocalNode.ToSharedRef(), Writer);
+			Op.AdditionalData.Add(TEXT("NodeData"), NodeDataString);
+			
+			UE_LOG(LogTemp, Log, TEXT("DiffEngine: AddNode (Local) - GUID: %s, Graph: %s, Data: %s"), *NodeGuid, *GraphName, *NodeDataString);
 			OutOperations.Add(Op);
 		}
 		// Node added in remote only
 		else if (!BaseNode.IsValid() && !LocalNode.IsValid() && RemoteNode.IsValid())
 		{
 			FMergeOperation Op = CreateOperation(EMergeOperationType::AddNode, GraphName, NodeGuid);
+			// Store the actual node data for the Apply Engine
+			FString NodeDataString;
+			TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&NodeDataString);
+			FJsonSerializer::Serialize(RemoteNode.ToSharedRef(), Writer);
+			Op.AdditionalData.Add(TEXT("NodeData"), NodeDataString);
+			
+			UE_LOG(LogTemp, Log, TEXT("DiffEngine: AddNode (Remote) - GUID: %s, Graph: %s, Data: %s"), *NodeGuid, *GraphName, *NodeDataString);
 			OutOperations.Add(Op);
 		}
 		// Node added in both (conflict)
@@ -553,8 +631,15 @@ void FDiffEngine::DiffNodes(
 			}
 			else
 			{
-				// Same node added in both
+				// Same node added in both (use local version)
 				FMergeOperation Op = CreateOperation(EMergeOperationType::AddNode, GraphName, NodeGuid);
+				// Store the actual node data for the Apply Engine
+				FString NodeDataString;
+				TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&NodeDataString);
+				FJsonSerializer::Serialize(LocalNode.ToSharedRef(), Writer);
+				Op.AdditionalData.Add(TEXT("NodeData"), NodeDataString);
+				
+				UE_LOG(LogTemp, Log, TEXT("DiffEngine: AddNode (Both) - GUID: %s, Graph: %s, Data: %s"), *NodeGuid, *GraphName, *NodeDataString);
 				OutOperations.Add(Op);
 			}
 		}

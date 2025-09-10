@@ -8,11 +8,15 @@
 #include "Widgets/Layout/SSeparator.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Widgets/Docking/SDockTab.h"
+#include "Widgets/Layout/SBorder.h"
 #include "Styling/AppStyle.h"
 #include "Misc/MessageDialog.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "ContentBrowserModule.h"
 #include "IContentBrowserSingleton.h"
+#include "DesktopPlatformModule.h"
+#include "IDesktopPlatform.h"
 #include "Editor.h"
 #include "Styling/CoreStyle.h"
 
@@ -361,7 +365,10 @@ TSharedRef<SWidget> SMergeUI::CreateConflictResolutionSection()
 				SNew(SButton)
 				.Text(FText::FromString(TEXT("📍 Use Local")))
 				.ToolTipText(FText::FromString(TEXT("Resolve all conflicts by preferring local changes")))
-				.OnClicked(this, &SMergeUI::OnResolveAllConflicts, FString(TEXT("UseLocal")))
+				.OnClicked_Lambda([this]() -> FReply
+				{
+					return OnResolveAllConflicts(FString(TEXT("UseLocal")));
+				})
 				.IsEnabled_Lambda([this]() -> bool
 				{
 					return bDiffPerformed && CurrentDiffResult.bHasConflicts;
@@ -375,7 +382,10 @@ TSharedRef<SWidget> SMergeUI::CreateConflictResolutionSection()
 				SNew(SButton)
 				.Text(FText::FromString(TEXT("🌐 Use Remote")))
 				.ToolTipText(FText::FromString(TEXT("Resolve all conflicts by preferring remote changes")))
-				.OnClicked(this, &SMergeUI::OnResolveAllConflicts, FString(TEXT("UseRemote")))
+				.OnClicked_Lambda([this]() -> FReply
+				{
+					return OnResolveAllConflicts(FString(TEXT("UseRemote")));
+				})
 				.IsEnabled_Lambda([this]() -> bool
 				{
 					return bDiffPerformed && CurrentDiffResult.bHasConflicts;
@@ -389,7 +399,10 @@ TSharedRef<SWidget> SMergeUI::CreateConflictResolutionSection()
 				SNew(SButton)
 				.Text(FText::FromString(TEXT("🔄 Smart Merge")))
 				.ToolTipText(FText::FromString(TEXT("Attempt intelligent conflict resolution")))
-				.OnClicked(this, &SMergeUI::OnResolveAllConflicts, FString(TEXT("SmartMerge")))
+				.OnClicked_Lambda([this]() -> FReply
+				{
+					return OnResolveAllConflicts(FString(TEXT("SmartMerge")));
+				})
 				.IsEnabled_Lambda([this]() -> bool
 				{
 					return bDiffPerformed && CurrentDiffResult.bHasConflicts;
@@ -402,7 +415,10 @@ TSharedRef<SWidget> SMergeUI::CreateConflictResolutionSection()
 				SNew(SButton)
 				.Text(FText::FromString(TEXT("🛡️ Non-Destructive")))
 				.ToolTipText(FText::FromString(TEXT("Resolve conflicts with non-destructive strategy")))
-				.OnClicked(this, &SMergeUI::OnResolveAllConflicts, FString(TEXT("NonDestructive")))
+				.OnClicked_Lambda([this]() -> FReply
+				{
+					return OnResolveAllConflicts(FString(TEXT("NonDestructive")));
+				})
 				.IsEnabled_Lambda([this]() -> bool
 				{
 					return bDiffPerformed && CurrentDiffResult.bHasConflicts;
@@ -664,10 +680,16 @@ FReply SMergeUI::OnCreateMergePlan()
 	*StatusMessage = TEXT("Creating merge plan...");
 
 	// Create the merge plan
+	UE_LOG(LogTemp, Log, TEXT("MergeUI: Creating merge plan with %d operations and %d conflicts"), 
+		CurrentDiffResult.Operations.Num(), CurrentDiffResult.Conflicts.Num());
+	
 	if (FMergePlanner::CreateMergePlan(CurrentDiffResult, MergeConfig, CurrentMergePlan))
 	{
 		bMergePlanCreated = true;
 		bHasUnresolvedConflicts = CurrentMergePlan.bRequiresManualReview || CurrentMergePlan.UnresolvedConflicts.Num() > 0;
+		
+		UE_LOG(LogTemp, Log, TEXT("MergeUI: Merge plan created successfully - %d auto-resolved, %d manual review"), 
+			CurrentMergePlan.AutoResolvedOperations.Num(), CurrentMergePlan.ManualReviewRequired.Num());
 		
 		*StatusMessage = FString::Printf(TEXT("Merge plan created: %d auto-resolved, %d need manual review"), 
 			CurrentMergePlan.AutoResolvedOperations.Num(), CurrentMergePlan.ManualReviewRequired.Num());
@@ -676,6 +698,7 @@ FReply SMergeUI::OnCreateMergePlan()
 	}
 	else
 	{
+		UE_LOG(LogTemp, Error, TEXT("MergeUI: Failed to create merge plan"));
 		*StatusMessage = TEXT("Failed to create merge plan");
 		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(TEXT("Failed to create merge plan. Check the log for details.")));
 	}
@@ -937,8 +960,15 @@ void SMergeUI::UpdatePreview()
 
 	if (bMergePlanCreated)
 	{
+		UE_LOG(LogTemp, Log, TEXT("MergeUI: Updating operation summary - %d auto-resolved, %d manual"), 
+			CurrentMergePlan.AutoResolvedOperations.Num(), CurrentMergePlan.ManualReviewRequired.Num());
+		
 		*OperationSummaryText = FString::Printf(TEXT("Operations: %d auto-resolved, %d manual"), 
 			CurrentMergePlan.AutoResolvedOperations.Num(), CurrentMergePlan.ManualReviewRequired.Num());
+	}
+	else
+	{
+		UE_LOG(LogTemp, Log, TEXT("MergeUI: Merge plan not created yet, keeping default operation summary"));
 	}
 }
 
@@ -1011,32 +1041,155 @@ FSlateColor SMergeUI::GetStatusColor() const
 
 bool SMergeUI::ShowBlueprintSelectionDialog(FString& OutSelectedPath)
 {
-	// Use content browser to select Blueprint
-	FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
-	IContentBrowserSingleton& ContentBrowserSingleton = ContentBrowserModule.Get();
+	// Create a custom asset picker dialog
+	TSharedRef<SWindow> AssetPickerWindow = SNew(SWindow)
+		.Title(FText::FromString(TEXT("Select Blueprint")))
+		.ClientSize(FVector2D(800, 600))
+		.SupportsMaximize(true)
+		.SupportsMinimize(false)
+		.IsTopmostWindow(true);
 
-	TArray<FAssetData> SelectedAssets;
-	if (ContentBrowserSingleton.OpenAssetDialog(
-		FOpenAssetDialogConfig(
-			FText::FromString(TEXT("Select Blueprint")),
-			TEXT("/Game"),
-			UBlueprint::StaticClass()->GetFName()
-		),
-		SelectedAssets))
+	FString SelectedAssetPath;
+	bool bAssetSelected = false;
+
+	// Create the asset picker content
+	TSharedRef<SWidget> AssetPickerContent = SNew(SVerticalBox)
+		+ SVerticalBox::Slot()
+		.FillHeight(1.0f)
+		[
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+			.Padding(5)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Select a Blueprint asset:")))
+				.Font(FAppStyle::GetFontStyle("PropertyWindow.NormalFont"))
+			]
+		]
+		+ SVerticalBox::Slot()
+		.FillHeight(8.0f)
+		[
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+			.Padding(5)
+			[
+				// Create a simple list of available Blueprint assets
+				SNew(SScrollBox)
+				+ SScrollBox::Slot()
+				[
+					CreateBlueprintAssetList(SelectedAssetPath, bAssetSelected)
+				]
+			]
+		]
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(5)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.Padding(0, 0, 5, 0)
+			[
+				SNew(SButton)
+				.Text(FText::FromString(TEXT("OK")))
+				.IsEnabled_Lambda([&bAssetSelected]() { return bAssetSelected; })
+				.OnClicked_Lambda([&SelectedAssetPath, AssetPickerWindow]() -> FReply
+				{
+					AssetPickerWindow->RequestDestroyWindow();
+					return FReply::Handled();
+				})
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			[
+				SNew(SButton)
+				.Text(FText::FromString(TEXT("Cancel")))
+				.OnClicked_Lambda([AssetPickerWindow]() -> FReply
+				{
+					AssetPickerWindow->RequestDestroyWindow();
+					return FReply::Handled();
+				})
+			]
+		];
+
+	AssetPickerWindow->SetContent(AssetPickerContent);
+	FSlateApplication::Get().AddModalWindow(AssetPickerWindow, nullptr);
+
+	if (bAssetSelected && !SelectedAssetPath.IsEmpty())
 	{
-		if (SelectedAssets.Num() > 0)
-		{
-			OutSelectedPath = SelectedAssets[0].ObjectPath.ToString();
-			return true;
-		}
+		OutSelectedPath = SelectedAssetPath;
+		return true;
 	}
 
 	return false;
 }
 
+TSharedRef<SWidget> SMergeUI::CreateBlueprintAssetList(FString& OutSelectedPath, bool& bAssetSelected)
+{
+	// Get all Blueprint assets from the project
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+	
+	FARFilter Filter;
+	Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
+	Filter.bRecursiveClasses = true;
+	
+	TArray<FAssetData> BlueprintAssets;
+	AssetRegistry.GetAssets(Filter, BlueprintAssets);
+	
+	// Create a vertical box to hold all the asset buttons
+	TSharedRef<SVerticalBox> AssetListBox = SNew(SVerticalBox);
+	
+	for (const FAssetData& AssetData : BlueprintAssets)
+	{
+		FString AssetPath = AssetData.GetObjectPathString();
+		FString AssetName = AssetData.AssetName.ToString();
+		
+		AssetListBox->AddSlot()
+		.AutoHeight()
+		.Padding(2)
+		[
+			SNew(SButton)
+			.Text(FText::FromString(AssetName))
+			.ToolTipText(FText::FromString(AssetPath))
+			.OnClicked_Lambda([&OutSelectedPath, &bAssetSelected, AssetPath]() -> FReply
+			{
+				OutSelectedPath = AssetPath;
+				bAssetSelected = true;
+				return FReply::Handled();
+			})
+		];
+	}
+	
+	// If no assets found, show a message
+	if (BlueprintAssets.Num() == 0)
+	{
+		AssetListBox->AddSlot()
+		.AutoHeight()
+		.Padding(10)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("No Blueprint assets found in the project.")))
+			.ColorAndOpacity(FLinearColor::Red)
+		];
+	}
+	
+	return AssetListBox;
+}
+
 UBlueprint* SMergeUI::LoadBlueprintFromPath(const FString& Path)
 {
-	return LoadObject<UBlueprint>(nullptr, *Path);
+	// Path should now be a proper asset path from Content Browser (e.g., "/Game/FirstPerson/Blueprints/BP_FirstPersonCharacter")
+	UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *Path);
+	
+	if (Blueprint)
+	{
+		UE_LOG(LogTemp, Log, TEXT("Successfully loaded Blueprint: %s from path: %s"), *Blueprint->GetName(), *Path);
+		return Blueprint;
+	}
+	
+	UE_LOG(LogTemp, Warning, TEXT("Failed to load Blueprint from path: %s"), *Path);
+	return nullptr;
 }
 
 FReply SMergeUI::OnResolveConflict(int32 ConflictIndex, const FString& Resolution)

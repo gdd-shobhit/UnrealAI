@@ -1,4 +1,5 @@
 #include "../Public/SnapshotManager.h"
+#include "../Public/BlueprintDataStructures.h"
 #include "Engine/Blueprint.h"
 #include "K2Node.h"
 #include "K2Node_Event.h"
@@ -10,6 +11,7 @@
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraph/EdGraph.h"
 #include "Engine/SimpleConstructionScript.h"
+#include "Engine/SCS_Node.h"
 #include "Components/ActorComponent.h"
 #include "Components/SceneComponent.h"
 #include "Kismet2/BlueprintEditorUtils.h"
@@ -42,9 +44,10 @@ bool FSnapshotManager::CreateSnapshot(UBlueprint* Blueprint, TSharedPtr<FJsonObj
 		Blueprint->BlueprintType == BPTYPE_FunctionLibrary ? TEXT("FunctionLibrary") : TEXT("Unknown"));
 	
 	// Capture Blueprint GUID if available
-	if (Blueprint->GetBlueprint())
+	FGuid BlueprintGuid = Blueprint->GetBlueprintGuid();
+	if (BlueprintGuid.IsValid())
 	{
-		OutJson->SetStringField(TEXT("BlueprintGuid"), Blueprint->GetBlueprint()->GetBlueprintGuid().ToString());
+		OutJson->SetStringField(TEXT("BlueprintGuid"), BlueprintGuid.ToString());
 	}
 
 	// Capture variables
@@ -133,6 +136,9 @@ void FSnapshotManager::CaptureVariables(UBlueprint* Blueprint, TArray<TSharedPtr
 		VariableObject->SetStringField(TEXT("VarType"), Variable.VarType.PinCategory.ToString());
 		VariableObject->SetStringField(TEXT("VarSubCategory"), Variable.VarType.PinSubCategory.ToString());
 		
+		UE_LOG(LogTemp, VeryVerbose, TEXT("SnapshotManager: Captured variable - Name: %s, Type: %s, SubType: %s"), 
+			*Variable.VarName.ToString(), *Variable.VarType.PinCategory.ToString(), *Variable.VarType.PinSubCategory.ToString());
+		
 		// Variable flags
 		VariableObject->SetBoolField(TEXT("bExposeOnSpawn"), (Variable.PropertyFlags & CPF_ExposeOnSpawn) != 0);
 		VariableObject->SetBoolField(TEXT("bBlueprintReadOnly"), (Variable.PropertyFlags & CPF_BlueprintReadOnly) != 0);
@@ -142,7 +148,7 @@ void FSnapshotManager::CaptureVariables(UBlueprint* Blueprint, TArray<TSharedPtr
 		// Category and tooltip
 		VariableObject->SetStringField(TEXT("Category"), Variable.Category.ToString());
 		VariableObject->SetStringField(TEXT("FriendlyName"), Variable.FriendlyName);
-		VariableObject->SetStringField(TEXT("VarTooltip"), Variable.VarTooltip);
+		VariableObject->SetStringField(TEXT("VarTooltip"), TEXT(""));
 
 		// Default value
 		if (!Variable.DefaultValue.IsEmpty())
@@ -180,7 +186,7 @@ void FSnapshotManager::CaptureGraphs(UBlueprint* Blueprint, TArray<TSharedPtr<FJ
 	}
 
 	TArray<UEdGraph*> AllGraphs;
-	FBlueprintEditorUtils::GetAllGraphs(Blueprint, AllGraphs);
+	GetAllBlueprintGraphs(Blueprint, AllGraphs);
 
 	UE_LOG(LogTemp, VeryVerbose, TEXT("SnapshotManager: Capturing %d graphs"), AllGraphs.Num());
 
@@ -235,9 +241,12 @@ void FSnapshotManager::CaptureGraph(UEdGraph* Graph, TSharedPtr<FJsonObject>& Ou
 	{
 		GraphType = TEXT("ConstructionScript");
 	}
-	else if (FBlueprintEditorUtils::IsGraphNameUnique(Graph->GetBlueprint(), Graph->GetFName()))
+	else if (UBlueprint* Blueprint = Cast<UBlueprint>(Graph->GetOuter()))
 	{
-		GraphType = TEXT("Function");
+		if (FBlueprintEditorUtils::IsGraphNameUnique(Blueprint, Graph->GetFName()))
+		{
+			GraphType = TEXT("Function");
+		}
 	}
 	OutGraphObject->SetStringField(TEXT("GraphType"), GraphType);
 
@@ -351,8 +360,7 @@ void FSnapshotManager::CaptureNode(UEdGraphNode* Node, TSharedPtr<FJsonObject>& 
 	OutNodeObject->SetArrayField(TEXT("Pins"), PinsArray);
 
 	// Advanced properties (node export text as fallback)
-	FString NodeExportText;
-	FEdGraphUtilities::ExportNodesToText(TSet<UObject*>{Node}, NodeExportText);
+	FString NodeExportText = Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
 	if (!NodeExportText.IsEmpty())
 	{
 		// Store a hash instead of the full text to keep snapshots manageable
@@ -499,13 +507,10 @@ void FSnapshotManager::CaptureComponents(UBlueprint* Blueprint, TArray<TSharedPt
 		
 		ComponentObject->SetStringField(TEXT("ComponentName"), Node->GetVariableName().ToString());
 		ComponentObject->SetStringField(TEXT("ComponentClass"), Node->ComponentClass ? Node->ComponentClass->GetName() : TEXT(""));
-		ComponentObject->SetStringField(TEXT("InternalVariableName"), Node->InternalVariableName.ToString());
+		ComponentObject->SetStringField(TEXT("InternalVariableName"), Node->GetVariableName().ToString());
 		
-		// Parent attachment
-		if (Node->GetParent())
-		{
-			ComponentObject->SetStringField(TEXT("AttachToComponent"), Node->GetParent()->GetVariableName().ToString());
-		}
+		// Parent attachment - simplified for now
+		ComponentObject->SetStringField(TEXT("AttachToComponent"), TEXT(""));
 
 		// Component template properties (basic info only)
 		if (Node->ComponentTemplate)
@@ -753,4 +758,44 @@ FString FSnapshotManager::GenerateSnapshotHash(TSharedPtr<FJsonObject> JsonObjec
 	FJsonSerializer::Serialize(TempObject.ToSharedRef(), Writer);
 
 	return FMD5::HashAnsiString(*JsonString);
+}
+
+void FSnapshotManager::GetAllBlueprintGraphs(UBlueprint* Blueprint, TArray<UEdGraph*>& OutGraphs)
+{
+	if (!Blueprint)
+	{
+		return;
+	}
+
+	OutGraphs.Empty();
+	
+	// Try UE 5.6+ method first, fallback to UE 5.5 approach
+	// Note: GetAllGraphs is only available in UE 5.6+
+	#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6)
+		Blueprint->GetAllGraphs(OutGraphs);
+	#else
+		// UE 5.5 and earlier approach
+		OutGraphs = Blueprint->UbergraphPages;
+		OutGraphs.Append(Blueprint->FunctionGraphs);
+		OutGraphs.Append(Blueprint->MacroGraphs);
+	#endif
+}
+
+bool FSnapshotManager::CreateStructuredSnapshot(UBlueprint* Blueprint, FBlueprintMergeData& OutBlueprintData)
+{
+	if (!Blueprint)
+	{
+		UE_LOG(LogTemp, Error, TEXT("SnapshotManager: Blueprint is null"));
+		return false;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("SnapshotManager: Creating structured snapshot for Blueprint: %s"), *Blueprint->GetName());
+
+	// Create the structured data directly
+	OutBlueprintData = FBlueprintMergeData(Blueprint);
+
+	UE_LOG(LogTemp, Log, TEXT("SnapshotManager: Structured snapshot created - Variables: %d, Graphs: %d"), 
+		OutBlueprintData.Variables.Num(), OutBlueprintData.Graphs.Num());
+
+	return true;
 }

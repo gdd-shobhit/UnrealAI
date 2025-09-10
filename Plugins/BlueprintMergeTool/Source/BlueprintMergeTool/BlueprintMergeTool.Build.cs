@@ -70,7 +70,8 @@ public class BlueprintMergeTool : ModuleRules
 				"DerivedDataCache",
 				"Json",
 				"JsonUtilities",
-				"HTTP"
+				"HTTP",
+				"DesktopPlatform"
 			}
 		);
 

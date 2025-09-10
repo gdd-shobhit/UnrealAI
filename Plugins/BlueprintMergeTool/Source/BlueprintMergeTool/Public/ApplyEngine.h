@@ -5,6 +5,7 @@
 #include "Engine/Blueprint.h"
 #include "DiffEngine.h"
 #include "MergePlanner.h"
+#include "BlueprintDataStructures.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
@@ -68,6 +69,19 @@ public:
 	);
 
 	/**
+	 * Apply structured data directly to a Blueprint
+	 * @param TargetBlueprint Blueprint to modify
+	 * @param BlueprintData Structured data to apply
+	 * @param OutResult Result of the application
+	 * @return True if application was successful
+	 */
+	static bool ApplyStructuredData(
+		UBlueprint* TargetBlueprint,
+		const FBlueprintMergeData& BlueprintData,
+		FApplyResult& OutResult
+	);
+
+	/**
 	 * Apply a single merge operation
 	 * @param TargetBlueprint Blueprint to modify
 	 * @param Operation Operation to apply
@@ -102,6 +116,43 @@ public:
 		UBlueprint* Blueprint,
 		bool bForceCompile,
 		FApplyResult& OutResult
+	);
+
+	/**
+	 * Add a variable from structured data
+	 * @param Blueprint Target blueprint
+	 * @param VariableData Structured variable data
+	 * @param OutError Error message if operation fails
+	 * @return True if successful
+	 */
+	static bool AddVariableFromStructuredData(
+		UBlueprint* Blueprint,
+		const FBlueprintMergeVariableData& VariableData,
+		FString& OutError
+	);
+
+	/**
+	 * Add a graph from structured data
+	 * @param Blueprint Target blueprint
+	 * @param GraphData Structured graph data
+	 * @param OutError Error message if operation fails
+	 * @return True if successful
+	 */
+	static bool AddGraphFromStructuredData(
+		UBlueprint* Blueprint,
+		const FBlueprintMergeGraphData& GraphData,
+		FString& OutError
+	);
+
+	/**
+	 * Validate that custom classes referenced in the data are available in the target project
+	 * @param BlueprintData Structured data to validate
+	 * @param OutMissingClasses Array of missing class paths
+	 * @return True if all custom classes are available
+	 */
+	static bool ValidateCustomClassAvailability(
+		const FBlueprintMergeData& BlueprintData,
+		TArray<FString>& OutMissingClasses
 	);
 
 private:

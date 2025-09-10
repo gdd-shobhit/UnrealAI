@@ -7,6 +7,7 @@
 #include "K2Node.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
+#include "BlueprintDataStructures.h"
 
 /**
  * Produces deterministic JSON snapshots of UBlueprint objects
@@ -25,6 +26,21 @@ public:
 	 * @return True if successful
 	 */
 	static bool CreateSnapshot(UBlueprint* Blueprint, TSharedPtr<FJsonObject>& OutJson);
+
+	/**
+	 * Create a structured data snapshot of a Blueprint
+	 * @param Blueprint The blueprint to snapshot
+	 * @param OutBlueprintData The resulting structured data
+	 * @return True if successful
+	 */
+	static bool CreateStructuredSnapshot(UBlueprint* Blueprint, FBlueprintMergeData& OutBlueprintData);
+
+	/**
+	 * Get all graphs from a Blueprint (version-aware)
+	 * @param Blueprint The blueprint to get graphs from
+	 * @param OutGraphs Array to populate with all graphs
+	 */
+	static void GetAllBlueprintGraphs(UBlueprint* Blueprint, TArray<UEdGraph*>& OutGraphs);
 
 	/**
 	 * Create a JSON snapshot from a Blueprint asset path

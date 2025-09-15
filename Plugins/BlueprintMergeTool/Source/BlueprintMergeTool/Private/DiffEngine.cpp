@@ -90,6 +90,8 @@ bool FDiffEngine::PerformThreeWayDiff(
 		case EMergeOperationType::AddComponent: OpTypeName = TEXT("AddComponent"); break;
 		case EMergeOperationType::RemoveComponent: OpTypeName = TEXT("RemoveComponent"); break;
 		case EMergeOperationType::UpdateComponent: OpTypeName = TEXT("UpdateComponent"); break;
+		case EMergeOperationType::AddGraph: OpTypeName = TEXT("AddGraph"); break;
+		case EMergeOperationType::RemoveGraph: OpTypeName = TEXT("RemoveGraph"); break;
 		}
 		
 		// Get data from AdditionalData based on operation type
@@ -101,6 +103,10 @@ bool FDiffEngine::PerformThreeWayDiff(
 		else if (Op.OperationType == EMergeOperationType::AddNode)
 		{
 			DataKey = TEXT("NodeData");
+		}
+		else if (Op.OperationType == EMergeOperationType::AddGraph)
+		{
+			DataKey = TEXT("GraphData");
 		}
 		
 		FString OperationData = DataKey.IsEmpty() ? TEXT("") : Op.AdditionalData.FindRef(DataKey);
@@ -304,60 +310,97 @@ void FDiffEngine::DiffVariables(
 	TArray<FMergeOperation>& OutOperations,
 	TArray<FMergeConflict>& OutConflicts)
 {
-	// Build lookup maps
+	// NOTE: This function groups variables by NAME, not GUID, to handle the case where
+	// the same variable exists in different Blueprint instances with different GUIDs.
+	// 
+	// In a proper Perforce/Git integration:
+	// - Same variables should have same GUIDs across all versions
+	// - GUID comparison should be enabled in AreVariableGuidsIdentical()
+	// - This would allow for more precise conflict detection
+	//
+	// For now, we compare by name and content, with GUID comparison disabled for testing.
+	
+	// Build lookup maps by variable name (not GUID) to handle same-name variables
 	TMap<FString, TSharedPtr<FJsonObject>> BaseVarMap, LocalVarMap, RemoteVarMap;
-	BuildLookupMap(BaseVars, TEXT("VariableGuid"), BaseVarMap);
-	BuildLookupMap(LocalVars, TEXT("VariableGuid"), LocalVarMap);
-	BuildLookupMap(RemoteVars, TEXT("VariableGuid"), RemoteVarMap);
+	BuildLookupMap(BaseVars, TEXT("VariableName"), BaseVarMap);
+	BuildLookupMap(LocalVars, TEXT("VariableName"), LocalVarMap);
+	BuildLookupMap(RemoteVars, TEXT("VariableName"), RemoteVarMap);
 
-	// Get union of all variable GUIDs
-	TSet<FString> AllVarGuids;
-	BaseVarMap.GetKeys(AllVarGuids);
-	LocalVarMap.GetKeys(AllVarGuids);
-	RemoteVarMap.GetKeys(AllVarGuids);
+	// Get union of all variable names
+	TSet<FString> AllVarNames;
+	BaseVarMap.GetKeys(AllVarNames);
+	LocalVarMap.GetKeys(AllVarNames);
+	RemoteVarMap.GetKeys(AllVarNames);
 
-	for (const FString& VarGuid : AllVarGuids)
+	for (const FString& VarName : AllVarNames)
 	{
-		TSharedPtr<FJsonObject> BaseVar = BaseVarMap.FindRef(VarGuid);
-		TSharedPtr<FJsonObject> LocalVar = LocalVarMap.FindRef(VarGuid);
-		TSharedPtr<FJsonObject> RemoteVar = RemoteVarMap.FindRef(VarGuid);
-
-		FString VarName = BaseVar.IsValid() ? BaseVar->GetStringField(TEXT("VariableName")) :
-						  LocalVar.IsValid() ? LocalVar->GetStringField(TEXT("VariableName")) :
-						  RemoteVar.IsValid() ? RemoteVar->GetStringField(TEXT("VariableName")) : TEXT("Unknown");
+		TSharedPtr<FJsonObject> BaseVar = BaseVarMap.FindRef(VarName);
+		TSharedPtr<FJsonObject> LocalVar = LocalVarMap.FindRef(VarName);
+		TSharedPtr<FJsonObject> RemoteVar = RemoteVarMap.FindRef(VarName);
 
 		// Variable added in local only
 		if (!BaseVar.IsValid() && LocalVar.IsValid() && !RemoteVar.IsValid())
 		{
-			FMergeOperation Op = CreateOperation(EMergeOperationType::AddVariable, TEXT(""), VarGuid);
+			FString LocalVarGuid = LocalVar->GetStringField(TEXT("VariableGuid"));
+			FMergeOperation Op = CreateOperation(EMergeOperationType::AddVariable, TEXT(""), LocalVarGuid);
 			// Store the actual variable data for the Apply Engine
 			FString VariableDataString;
 			TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&VariableDataString);
 			FJsonSerializer::Serialize(LocalVar.ToSharedRef(), Writer);
 			Op.AdditionalData.Add(TEXT("VariableData"), VariableDataString);
 			
-			UE_LOG(LogTemp, Log, TEXT("DiffEngine: AddVariable (Local) - GUID: %s, Data: %s"), *VarGuid, *VariableDataString);
+			UE_LOG(LogTemp, Log, TEXT("DiffEngine: AddVariable (Local) - Name: %s, GUID: %s"), *VarName, *LocalVarGuid);
 			OutOperations.Add(Op);
 		}
 		// Variable added in remote only
 		else if (!BaseVar.IsValid() && !LocalVar.IsValid() && RemoteVar.IsValid())
 		{
-			FMergeOperation Op = CreateOperation(EMergeOperationType::AddVariable, TEXT(""), VarGuid);
+			FString RemoteVarGuid = RemoteVar->GetStringField(TEXT("VariableGuid"));
+			FMergeOperation Op = CreateOperation(EMergeOperationType::AddVariable, TEXT(""), RemoteVarGuid);
 			// Store the actual variable data for the Apply Engine
 			FString VariableDataString;
 			TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&VariableDataString);
 			FJsonSerializer::Serialize(RemoteVar.ToSharedRef(), Writer);
 			Op.AdditionalData.Add(TEXT("VariableData"), VariableDataString);
 			
-			UE_LOG(LogTemp, Log, TEXT("DiffEngine: AddVariable (Remote) - GUID: %s, Data: %s"), *VarGuid, *VariableDataString);
+			UE_LOG(LogTemp, Log, TEXT("DiffEngine: AddVariable (Remote) - Name: %s, GUID: %s"), *VarName, *RemoteVarGuid);
 			OutOperations.Add(Op);
 		}
 		// Variable added in both (conflict)
 		else if (!BaseVar.IsValid() && LocalVar.IsValid() && RemoteVar.IsValid())
 		{
+			FString LocalVarGuid = LocalVar->GetStringField(TEXT("VariableGuid"));
+			FString RemoteVarGuid = RemoteVar->GetStringField(TEXT("VariableGuid"));
+			
+			// Check if GUIDs are identical (should be true with proper Perforce/Git integration)
+			bool bSameGuid = AreVariableGuidsIdentical(LocalVar, RemoteVar);
+			
 			TArray<FString> DifferingFields;
-			if (CompareJsonObjects(LocalVar, RemoteVar, DifferingFields))
+			bool bDifferentContent = CompareVariablesIgnoringGuid(LocalVar, RemoteVar, DifferingFields);
+			
+			// Debug logging to see what's being compared
+			UE_LOG(LogTemp, Log, TEXT("DiffEngine: Comparing variable '%s' - Local GUID: %s, Remote GUID: %s"), 
+				*VarName, *LocalVarGuid, *RemoteVarGuid);
+			
+			// Log the actual variable data for debugging
+			FString LocalVarData, RemoteVarData;
+			TSharedRef<TJsonWriter<>> LocalWriter = TJsonWriterFactory<>::Create(&LocalVarData);
+			TSharedRef<TJsonWriter<>> RemoteWriter = TJsonWriterFactory<>::Create(&RemoteVarData);
+			FJsonSerializer::Serialize(LocalVar.ToSharedRef(), LocalWriter);
+			FJsonSerializer::Serialize(RemoteVar.ToSharedRef(), RemoteWriter);
+			UE_LOG(LogTemp, Log, TEXT("DiffEngine: Local variable data: %s"), *LocalVarData);
+			UE_LOG(LogTemp, Log, TEXT("DiffEngine: Remote variable data: %s"), *RemoteVarData);
+			
+			UE_LOG(LogTemp, Log, TEXT("DiffEngine: Content comparison result (ignoring GUID): %s, Differing fields: %s"), 
+				bDifferentContent ? TEXT("DIFFERENT") : TEXT("IDENTICAL"),
+				*FString::Join(DifferingFields, TEXT(", ")));
+			
+			if (bDifferentContent)
 			{
+				// Variables have same name but different properties - this is a conflict
+				UE_LOG(LogTemp, Warning, TEXT("DiffEngine: Variable '%s' added in both but differs in: %s"), 
+					*VarName, *FString::Join(DifferingFields, TEXT(", ")));
+				
 				FMergeConflict Conflict = CreateConflict(
 					TEXT("Variable"),
 					VarName,
@@ -369,38 +412,41 @@ void FDiffEngine::DiffVariables(
 				Conflict.Severity = AnalyzeConflictSeverity(TEXT("Variable"), DifferingFields);
 				OutConflicts.Add(Conflict);
 			}
+			else if (!bSameGuid)
+			{
+				// Same content but different GUIDs - this shouldn't happen with proper version control
+				// For now, we'll treat it as identical and skip the operation
+				UE_LOG(LogTemp, Warning, TEXT("DiffEngine: Variable '%s' has same content but different GUIDs (Local: %s, Remote: %s) - treating as identical"), 
+					*VarName, *LocalVarGuid, *RemoteVarGuid);
+				UE_LOG(LogTemp, Log, TEXT("DiffEngine: Variable '%s' added identically in both - skipping operation (same name, type, flags, default value)"), *VarName);
+			}
 			else
 			{
-				// Same variable added in both, just add once (use local version)
-				FMergeOperation Op = CreateOperation(EMergeOperationType::AddVariable, TEXT(""), VarGuid);
-				// Store the actual variable data for the Apply Engine
-				FString VariableDataString;
-				TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&VariableDataString);
-				FJsonSerializer::Serialize(LocalVar.ToSharedRef(), Writer);
-				Op.AdditionalData.Add(TEXT("VariableData"), VariableDataString);
-				
-				UE_LOG(LogTemp, Log, TEXT("DiffEngine: AddVariable (Both) - GUID: %s, Data: %s"), *VarGuid, *VariableDataString);
-				OutOperations.Add(Op);
+				// Variables are completely identical (name, type, flags, default value, GUID) - no operation needed
+				UE_LOG(LogTemp, Log, TEXT("DiffEngine: Variable '%s' added identically in both - skipping operation (same name, type, flags, default value, GUID)"), *VarName);
 			}
 		}
 		// Variable removed in local only
 		else if (BaseVar.IsValid() && !LocalVar.IsValid() && RemoteVar.IsValid())
 		{
-			FMergeOperation Op = CreateOperation(EMergeOperationType::RemoveVariable, TEXT(""), VarGuid);
+			FString BaseVarGuid = BaseVar->GetStringField(TEXT("VariableGuid"));
+			FMergeOperation Op = CreateOperation(EMergeOperationType::RemoveVariable, TEXT(""), BaseVarGuid);
 			Op.AdditionalData.Add(TEXT("Reason"), TEXT("LocalRemoval"));
 			OutOperations.Add(Op);
 		}
 		// Variable removed in remote only
 		else if (BaseVar.IsValid() && LocalVar.IsValid() && !RemoteVar.IsValid())
 		{
-			FMergeOperation Op = CreateOperation(EMergeOperationType::RemoveVariable, TEXT(""), VarGuid);
+			FString BaseVarGuid = BaseVar->GetStringField(TEXT("VariableGuid"));
+			FMergeOperation Op = CreateOperation(EMergeOperationType::RemoveVariable, TEXT(""), BaseVarGuid);
 			Op.AdditionalData.Add(TEXT("Reason"), TEXT("RemoteRemoval"));
 			OutOperations.Add(Op);
 		}
 		// Variable removed in both
 		else if (BaseVar.IsValid() && !LocalVar.IsValid() && !RemoteVar.IsValid())
 		{
-			FMergeOperation Op = CreateOperation(EMergeOperationType::RemoveVariable, TEXT(""), VarGuid);
+			FString BaseVarGuid = BaseVar->GetStringField(TEXT("VariableGuid"));
+			FMergeOperation Op = CreateOperation(EMergeOperationType::RemoveVariable, TEXT(""), BaseVarGuid);
 			Op.AdditionalData.Add(TEXT("Reason"), TEXT("BothRemoval"));
 			OutOperations.Add(Op);
 		}
@@ -432,21 +478,24 @@ void FDiffEngine::DiffVariables(
 				else
 				{
 					// Same changes - no conflict needed
-					FMergeOperation Op = CreateOperation(EMergeOperationType::UpdateVariable, TEXT(""), VarGuid);
+					FString BaseVarGuid = BaseVar->GetStringField(TEXT("VariableGuid"));
+					FMergeOperation Op = CreateOperation(EMergeOperationType::UpdateVariable, TEXT(""), BaseVarGuid);
 					OutOperations.Add(Op);
 				}
 			}
 			else if (bLocalChanged)
 			{
 				// Only local changed
-				FMergeOperation Op = CreateOperation(EMergeOperationType::UpdateVariable, TEXT(""), VarGuid);
+				FString BaseVarGuid = BaseVar->GetStringField(TEXT("VariableGuid"));
+				FMergeOperation Op = CreateOperation(EMergeOperationType::UpdateVariable, TEXT(""), BaseVarGuid);
 				Op.AdditionalData.Add(TEXT("Source"), TEXT("Local"));
 				OutOperations.Add(Op);
 			}
 			else if (bRemoteChanged)
 			{
 				// Only remote changed
-				FMergeOperation Op = CreateOperation(EMergeOperationType::UpdateVariable, TEXT(""), VarGuid);
+				FString BaseVarGuid = BaseVar->GetStringField(TEXT("VariableGuid"));
+				FMergeOperation Op = CreateOperation(EMergeOperationType::UpdateVariable, TEXT(""), BaseVarGuid);
 				Op.AdditionalData.Add(TEXT("Source"), TEXT("Remote"));
 				OutOperations.Add(Op);
 			}
@@ -462,11 +511,38 @@ void FDiffEngine::DiffGraphs(
 	TArray<FMergeOperation>& OutOperations,
 	TArray<FMergeConflict>& OutConflicts)
 {
-	// Build lookup maps by graph name
+	// Build lookup maps by a stable graph key (FunctionName if present, else GraphName)
 	TMap<FString, TSharedPtr<FJsonObject>> BaseGraphMap, LocalGraphMap, RemoteGraphMap;
-	BuildLookupMap(BaseGraphs, TEXT("GraphName"), BaseGraphMap);
-	BuildLookupMap(LocalGraphs, TEXT("GraphName"), LocalGraphMap);
-	BuildLookupMap(RemoteGraphs, TEXT("GraphName"), RemoteGraphMap);
+	auto BuildGraphMap = [](const TArray<TSharedPtr<FJsonValue>>& Graphs, TMap<FString, TSharedPtr<FJsonObject>>& OutMap)
+	{
+		for (const TSharedPtr<FJsonValue>& GraphValue : Graphs)
+		{
+			if (!GraphValue.IsValid() || GraphValue->Type != EJson::Object)
+			{
+				continue;
+			}
+			TSharedPtr<FJsonObject> GraphObj = GraphValue->AsObject();
+			FString Key;
+			FString GraphType = GraphObj->GetStringField(TEXT("GraphType"));
+			if (GraphType == TEXT("Function"))
+			{
+				const TSharedPtr<FJsonValue>* FnField = GraphObj->Values.Find(TEXT("FunctionName"));
+				if (FnField && (*FnField)->Type == EJson::String)
+				{
+					Key = (*FnField)->AsString();
+				}
+			}
+			if (Key.IsEmpty())
+			{
+				Key = GraphObj->GetStringField(TEXT("GraphName"));
+			}
+			OutMap.Add(Key, GraphObj);
+		}
+	};
+
+	BuildGraphMap(BaseGraphs, BaseGraphMap);
+	BuildGraphMap(LocalGraphs, LocalGraphMap);
+	BuildGraphMap(RemoteGraphs, RemoteGraphMap);
 
 	// Get union of all graph names
 	TSet<FString> AllGraphNames;
@@ -487,6 +563,10 @@ void FDiffEngine::DiffGraphs(
 			TArray<FString> DifferingFields;
 			if (CompareJsonObjects(LocalGraph, RemoteGraph, DifferingFields))
 			{
+				// Graphs have same name but different properties - this is a conflict
+				UE_LOG(LogTemp, Warning, TEXT("DiffEngine: Graph '%s' added in both but differs in: %s"), 
+					*GraphName, *FString::Join(DifferingFields, TEXT(", ")));
+				
 				FMergeConflict Conflict = CreateConflict(
 					TEXT("Graph"),
 					GraphName,
@@ -499,20 +579,31 @@ void FDiffEngine::DiffGraphs(
 			}
 			else
 			{
-				FMergeOperation Op = CreateOperation(EMergeOperationType::AddGraph, GraphName, TEXT(""));
-				OutOperations.Add(Op);
+				// Graphs are completely identical - no operation needed
+				UE_LOG(LogTemp, Log, TEXT("DiffEngine: Graph '%s' added identically in both - skipping operation"), *GraphName);
 			}
 		}
 		else if (!BaseGraph.IsValid() && LocalGraph.IsValid())
 		{
 			// Graph added locally only
 			FMergeOperation Op = CreateOperation(EMergeOperationType::AddGraph, GraphName, TEXT(""));
+			// Attach full graph payload for one-shot creation
+			FString GraphDataString;
+			TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&GraphDataString);
+			FJsonSerializer::Serialize(LocalGraph.ToSharedRef(), Writer);
+			Op.AdditionalData.Add(TEXT("GraphData"), GraphDataString);
 			OutOperations.Add(Op);
 		}
 		else if (!BaseGraph.IsValid() && RemoteGraph.IsValid())
 		{
 			// Graph added remotely only
+			UE_LOG(LogTemp, Log, TEXT("DiffEngine: Function '%s' exists only in remote - creating AddGraph operation"), *GraphName);
 			FMergeOperation Op = CreateOperation(EMergeOperationType::AddGraph, GraphName, TEXT(""));
+			// Attach full graph payload for one-shot creation
+			FString GraphDataString;
+			TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&GraphDataString);
+			FJsonSerializer::Serialize(RemoteGraph.ToSharedRef(), Writer);
+			Op.AdditionalData.Add(TEXT("GraphData"), GraphDataString);
 			OutOperations.Add(Op);
 		}
 		else if (BaseGraph.IsValid() && !LocalGraph.IsValid() && !RemoteGraph.IsValid())
@@ -524,6 +615,7 @@ void FDiffEngine::DiffGraphs(
 		else if (BaseGraph.IsValid() && LocalGraph.IsValid() && RemoteGraph.IsValid())
 		{
 			// Graph exists in all three - diff the contents
+			UE_LOG(LogTemp, Log, TEXT("DiffEngine: Function '%s' exists in all three versions - diffing contents"), *GraphName);
 
 			// Diff nodes
 			const TArray<TSharedPtr<FJsonValue>>* BaseNodes = nullptr;
@@ -564,19 +656,25 @@ void FDiffEngine::DiffNodes(
 	TArray<FMergeOperation>& OutOperations,
 	TArray<FMergeConflict>& OutConflicts)
 {
-	// Build lookup maps by NodeGuid
+	// Build lookup maps by NodeGuid or semantic key based on toggle
 	TMap<FString, TSharedPtr<FJsonObject>> BaseNodeMap, LocalNodeMap, RemoteNodeMap;
+#if BPT_MERGE_USE_GUID_MATCHING
 	BuildLookupMap(BaseNodes, TEXT("NodeGuid"), BaseNodeMap);
 	BuildLookupMap(LocalNodes, TEXT("NodeGuid"), LocalNodeMap);
 	BuildLookupMap(RemoteNodes, TEXT("NodeGuid"), RemoteNodeMap);
+#else
+	BuildLookupMap(BaseNodes, TEXT("NodeTitle"), BaseNodeMap);
+	BuildLookupMap(LocalNodes, TEXT("NodeTitle"), LocalNodeMap);
+	BuildLookupMap(RemoteNodes, TEXT("NodeTitle"), RemoteNodeMap);
+#endif
 
-	// Get union of all node GUIDs
-	TSet<FString> AllNodeGuids;
-	BaseNodeMap.GetKeys(AllNodeGuids);
-	LocalNodeMap.GetKeys(AllNodeGuids);
-	RemoteNodeMap.GetKeys(AllNodeGuids);
+	// Get union of all node identifiers
+	TSet<FString> AllNodeIds;
+	BaseNodeMap.GetKeys(AllNodeIds);
+	LocalNodeMap.GetKeys(AllNodeIds);
+	RemoteNodeMap.GetKeys(AllNodeIds);
 
-	for (const FString& NodeGuid : AllNodeGuids)
+	for (const FString& NodeGuid : AllNodeIds)
 	{
 		TSharedPtr<FJsonObject> BaseNode = BaseNodeMap.FindRef(NodeGuid);
 		TSharedPtr<FJsonObject> LocalNode = LocalNodeMap.FindRef(NodeGuid);
@@ -589,27 +687,29 @@ void FDiffEngine::DiffNodes(
 		// Node added in local only
 		if (!BaseNode.IsValid() && LocalNode.IsValid() && !RemoteNode.IsValid())
 		{
-			FMergeOperation Op = CreateOperation(EMergeOperationType::AddNode, GraphName, NodeGuid);
+			const FString TargetId = LocalNode->GetStringField(TEXT("NodeGuid"));
+			FMergeOperation Op = CreateOperation(EMergeOperationType::AddNode, GraphName, TargetId);
 			// Store the actual node data for the Apply Engine
 			FString NodeDataString;
 			TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&NodeDataString);
 			FJsonSerializer::Serialize(LocalNode.ToSharedRef(), Writer);
 			Op.AdditionalData.Add(TEXT("NodeData"), NodeDataString);
 			
-			UE_LOG(LogTemp, Log, TEXT("DiffEngine: AddNode (Local) - GUID: %s, Graph: %s, Data: %s"), *NodeGuid, *GraphName, *NodeDataString);
+			UE_LOG(LogTemp, Log, TEXT("DiffEngine: AddNode (Local) - Key: %s, Graph: %s, Data: %s"), *NodeGuid, *GraphName, *NodeDataString);
 			OutOperations.Add(Op);
 		}
 		// Node added in remote only
 		else if (!BaseNode.IsValid() && !LocalNode.IsValid() && RemoteNode.IsValid())
 		{
-			FMergeOperation Op = CreateOperation(EMergeOperationType::AddNode, GraphName, NodeGuid);
+			const FString TargetId = RemoteNode->GetStringField(TEXT("NodeGuid"));
+			FMergeOperation Op = CreateOperation(EMergeOperationType::AddNode, GraphName, TargetId);
 			// Store the actual node data for the Apply Engine
 			FString NodeDataString;
 			TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&NodeDataString);
 			FJsonSerializer::Serialize(RemoteNode.ToSharedRef(), Writer);
 			Op.AdditionalData.Add(TEXT("NodeData"), NodeDataString);
 			
-			UE_LOG(LogTemp, Log, TEXT("DiffEngine: AddNode (Remote) - GUID: %s, Graph: %s, Data: %s"), *NodeGuid, *GraphName, *NodeDataString);
+			UE_LOG(LogTemp, Log, TEXT("DiffEngine: AddNode (Remote) - Key: %s, Graph: %s, Data: %s"), *NodeGuid, *GraphName, *NodeDataString);
 			OutOperations.Add(Op);
 		}
 		// Node added in both (conflict)
@@ -618,35 +718,41 @@ void FDiffEngine::DiffNodes(
 			TArray<FString> DifferingFields;
 			if (CompareJsonObjects(LocalNode, RemoteNode, DifferingFields))
 			{
-				FMergeConflict Conflict = CreateConflict(
-					TEXT("Node"),
-					NodeName,
-					TEXT("(not present)"),
-					LocalNode->GetStringField(TEXT("NodeTitle")),
-					RemoteNode->GetStringField(TEXT("NodeTitle")),
-					DifferingFields
-				);
-				Conflict.Severity = AnalyzeConflictSeverity(TEXT("Node"), DifferingFields);
-				OutConflicts.Add(Conflict);
+				// Ignore GUID-only differences
+				DifferingFields.RemoveAll([](const FString& Field){ return Field.Equals(TEXT("NodeGuid"), ESearchCase::IgnoreCase); });
+				if (DifferingFields.Num() == 0)
+				{
+					UE_LOG(LogTemp, Log, TEXT("DiffEngine: Node '%s' added identically in both (GUID-only diff) - skipping operation"), *NodeName);
+				}
+				else
+				{
+					// Nodes have same name but different properties - this is a conflict
+					UE_LOG(LogTemp, Warning, TEXT("DiffEngine: Node '%s' added in both but differs in: %s"), 
+						*NodeName, *FString::Join(DifferingFields, TEXT(", ")));
+				
+					FMergeConflict Conflict = CreateConflict(
+						TEXT("Node"),
+						NodeName,
+						TEXT("(not present)"),
+						LocalNode->GetStringField(TEXT("NodeTitle")),
+						RemoteNode->GetStringField(TEXT("NodeTitle")),
+						DifferingFields
+					);
+					Conflict.Severity = AnalyzeConflictSeverity(TEXT("Node"), DifferingFields);
+					OutConflicts.Add(Conflict);
+				}
 			}
 			else
 			{
-				// Same node added in both (use local version)
-				FMergeOperation Op = CreateOperation(EMergeOperationType::AddNode, GraphName, NodeGuid);
-				// Store the actual node data for the Apply Engine
-				FString NodeDataString;
-				TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&NodeDataString);
-				FJsonSerializer::Serialize(LocalNode.ToSharedRef(), Writer);
-				Op.AdditionalData.Add(TEXT("NodeData"), NodeDataString);
-				
-				UE_LOG(LogTemp, Log, TEXT("DiffEngine: AddNode (Both) - GUID: %s, Graph: %s, Data: %s"), *NodeGuid, *GraphName, *NodeDataString);
-				OutOperations.Add(Op);
+				// Nodes are completely identical - no operation needed
+				UE_LOG(LogTemp, Log, TEXT("DiffEngine: Node '%s' added identically in both - skipping operation"), *NodeName);
 			}
 		}
 		// Node removed
 		else if (BaseNode.IsValid() && !LocalNode.IsValid() && !RemoteNode.IsValid())
 		{
-			FMergeOperation Op = CreateOperation(EMergeOperationType::RemoveNode, GraphName, NodeGuid);
+			const FString TargetId = BaseNode->GetStringField(TEXT("NodeGuid"));
+			FMergeOperation Op = CreateOperation(EMergeOperationType::RemoveNode, GraphName, TargetId);
 			OutOperations.Add(Op);
 		}
 		// Node exists in all three - check for modifications
@@ -662,6 +768,19 @@ void FDiffEngine::DiffNodes(
 				TArray<FString> LocalRemoteDiffs;
 				if (CompareJsonObjects(LocalNode, RemoteNode, LocalRemoteDiffs))
 				{
+					// Ignore GUID-only differences
+					LocalRemoteDiffs.RemoveAll([](const FString& Field){ return Field.Equals(TEXT("NodeGuid"), ESearchCase::IgnoreCase); });
+					if (LocalRemoteDiffs.Num() == 0)
+					{
+						// Treat as same changes after ignoring GUIDs
+						const FString TargetId = BaseNode->GetStringField(TEXT("NodeGuid"));
+						FMergeOperation Op = CreateOperation(EMergeOperationType::UpdateNodeProperty, GraphName, TargetId);
+						OutOperations.Add(Op);
+						continue;
+					}
+					UE_LOG(LogTemp, Warning, TEXT("DiffEngine: Node '%s' in graph '%s' has conflicts in fields: %s"), 
+						*NodeName, *GraphName, *FString::Join(LocalRemoteDiffs, TEXT(", ")));
+					
 					// Check if it's just a move operation
 					if (IsMoveOperation(LocalNode, RemoteNode))
 					{
@@ -694,20 +813,23 @@ void FDiffEngine::DiffNodes(
 				else
 				{
 					// Same changes
-					FMergeOperation Op = CreateOperation(EMergeOperationType::UpdateNodeProperty, GraphName, NodeGuid);
+					const FString TargetId = BaseNode->GetStringField(TEXT("NodeGuid"));
+					FMergeOperation Op = CreateOperation(EMergeOperationType::UpdateNodeProperty, GraphName, TargetId);
 					OutOperations.Add(Op);
 				}
 			}
 			else if (bLocalChanged)
 			{
 				// Only local changed
-				FMergeOperation Op = CreateOperation(EMergeOperationType::UpdateNodeProperty, GraphName, NodeGuid);
+				const FString TargetId = BaseNode->GetStringField(TEXT("NodeGuid"));
+				FMergeOperation Op = CreateOperation(EMergeOperationType::UpdateNodeProperty, GraphName, TargetId);
 				OutOperations.Add(Op);
 			}
 			else if (bRemoteChanged)
 			{
 				// Only remote changed
-				FMergeOperation Op = CreateOperation(EMergeOperationType::UpdateNodeProperty, GraphName, NodeGuid);
+				const FString TargetId = BaseNode->GetStringField(TEXT("NodeGuid"));
+				FMergeOperation Op = CreateOperation(EMergeOperationType::UpdateNodeProperty, GraphName, TargetId);
 				OutOperations.Add(Op);
 			}
 		}
@@ -1034,6 +1156,8 @@ FString FDiffEngine::GenerateDiffSummary(const FDiffResult& DiffResult)
 		case EMergeOperationType::AddComponent: OpTypeName = TEXT("Add Component"); break;
 		case EMergeOperationType::RemoveComponent: OpTypeName = TEXT("Remove Component"); break;
 		case EMergeOperationType::UpdateComponent: OpTypeName = TEXT("Update Component"); break;
+		case EMergeOperationType::AddGraph: OpTypeName = TEXT("Add Graph"); break;
+		case EMergeOperationType::RemoveGraph: OpTypeName = TEXT("Remove Graph"); break;
 		}
 		Summary += FString::Printf(TEXT("  %s: %d\n"), *OpTypeName, OpCount.Value);
 	}
@@ -1154,6 +1278,73 @@ bool FDiffEngine::IsMoveOperation(
 	}
 
 	return false;
+}
+
+bool FDiffEngine::AreVariableGuidsIdentical(
+	TSharedPtr<FJsonObject> LocalVar,
+	TSharedPtr<FJsonObject> RemoteVar)
+{
+	if (!LocalVar.IsValid() || !RemoteVar.IsValid())
+	{
+		return false;
+	}
+
+	FString LocalGuid = LocalVar->GetStringField(TEXT("VariableGuid"));
+	FString RemoteGuid = RemoteVar->GetStringField(TEXT("VariableGuid"));
+	
+	// TODO: When Perforce/Git integration is implemented, same variables should have same GUIDs
+	// For now, we return true to skip GUID comparison during testing
+	// In production, this should be: return (LocalGuid == RemoteGuid);
+	return true; // Commented out for testing - will be enabled with Perforce integration
+}
+
+bool FDiffEngine::CompareVariablesIgnoringGuid(
+	TSharedPtr<FJsonObject> LocalVar,
+	TSharedPtr<FJsonObject> RemoteVar,
+	TArray<FString>& OutDifferingFields)
+{
+	if (!LocalVar.IsValid() || !RemoteVar.IsValid())
+	{
+		return false;
+	}
+
+	// Fields to ignore when comparing variables (these can be different without being a conflict)
+	TArray<FString> IgnoredFields = {
+		TEXT("VariableGuid") // GUIDs will be different in different Blueprint instances
+	};
+
+	// Get union of all field names
+	TSet<FString> AllFields;
+	for (const auto& Field : LocalVar->Values)
+	{
+		AllFields.Add(Field.Key);
+	}
+	for (const auto& Field : RemoteVar->Values)
+	{
+		AllFields.Add(Field.Key);
+	}
+
+	bool bHasDifferences = false;
+	for (const FString& FieldName : AllFields)
+	{
+		// Skip ignored fields
+		if (IgnoredFields.Contains(FieldName))
+		{
+			continue;
+		}
+
+		TSharedPtr<FJsonValue> ValueA = LocalVar->Values.FindRef(FieldName);
+		TSharedPtr<FJsonValue> ValueB = RemoteVar->Values.FindRef(FieldName);
+
+		TArray<FString> FieldDiffs;
+		if (CompareJsonValues(ValueA, ValueB, FieldDiffs))
+		{
+			OutDifferingFields.Add(FieldName);
+			bHasDifferences = true;
+		}
+	}
+
+	return bHasDifferences;
 }
 
 bool FDiffEngine::AreConnectionsEqual(

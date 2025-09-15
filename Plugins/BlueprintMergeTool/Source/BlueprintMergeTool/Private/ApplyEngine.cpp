@@ -11,6 +11,9 @@
 #include "K2Node_VariableSet.h"
 #include "K2Node_Event.h"
 #include "K2Node_CustomEvent.h"
+#include "K2Node_FunctionEntry.h"
+#include "K2Node_FunctionResult.h"
+#include "EdGraphSchema_K2.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Framework/Notifications/NotificationManager.h"
@@ -69,10 +72,38 @@ bool FApplyEngine::ApplyMergePlan(
 	OutResult = FApplyResult();
 	OutResult.bSuccess = true;
 
-	// Apply each operation
-	for (int32 i = 0; i < MergePlan.AutoResolvedOperations.Num(); i++)
+	// Sort operations to ensure proper dependency order: Variables -> Graphs -> Nodes -> Connections
+	TArray<FMergeOperation> SortedOperations = MergePlan.AutoResolvedOperations;
+	SortedOperations.Sort([](const FMergeOperation& A, const FMergeOperation& B) {
+		// Define operation priority (lower number = higher priority)
+		auto GetOperationPriority = [](EMergeOperationType Type) -> int32 {
+			switch (Type)
+			{
+			case EMergeOperationType::AddVariable:
+			case EMergeOperationType::UpdateVariable:
+			case EMergeOperationType::RemoveVariable:
+				return 1; // Variables first
+			case EMergeOperationType::AddGraph:
+			case EMergeOperationType::RemoveGraph:
+				return 2; // Graphs second
+			case EMergeOperationType::AddNode:
+			case EMergeOperationType::RemoveNode:
+			case EMergeOperationType::UpdateNodeProperty:
+				return 3; // Nodes third
+			case EMergeOperationType::LinkPins:
+			case EMergeOperationType::UnlinkPins:
+				return 4; // Connections last
+			default:
+				return 5; // Everything else
+			}
+		};
+		return GetOperationPriority(A.OperationType) < GetOperationPriority(B.OperationType);
+	});
+
+	// Apply each operation in sorted order
+	for (int32 i = 0; i < SortedOperations.Num(); i++)
 	{
-		const FMergeOperation& Operation = MergePlan.AutoResolvedOperations[i];
+		const FMergeOperation& Operation = SortedOperations[i];
 		FString OperationError;
 
 		bool bOperationSuccess = ApplyOperation(TargetBlueprint, Operation, OperationError);
@@ -188,6 +219,527 @@ bool FApplyEngine::ApplyOperation(
 				}
 			}
 			OutError = TEXT("Invalid node data for AddNode operation");
+			return false;
+		}
+
+	case EMergeOperationType::AddGraph:
+		{
+			// One-shot graph creation using payload when Base lacks the function
+			FString GraphDataJson = Operation.AdditionalData.FindRef(TEXT("GraphData"));
+			if (GraphDataJson.IsEmpty())
+			{
+				// Backward compatibility: no payload -> treat as no-op for now
+				OutError = TEXT("No GraphData payload for AddGraph");
+				return false;
+			}
+			
+			// Debug: Log the first 500 characters of the GraphData JSON
+			UE_LOG(LogTemp, Log, TEXT("AddGraph: GraphData JSON (first 500 chars): %s"), *GraphDataJson.Left(500));
+			
+			TSharedPtr<FJsonObject> GraphDataObj;
+			TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(GraphDataJson);
+			if (!FJsonSerializer::Deserialize(Reader, GraphDataObj) || !GraphDataObj.IsValid())
+			{
+				OutError = TEXT("Failed to parse GraphData JSON");
+				return false;
+			}
+
+			const FString GraphType = GraphDataObj->GetStringField(TEXT("GraphType"));
+			const FString FunctionName = GraphDataObj->GetStringField(TEXT("FunctionName"));
+			const FString GraphName = GraphDataObj->GetStringField(TEXT("GraphName"));
+
+			if (GraphType == TEXT("Function"))
+			{
+				// Create or find function graph by name
+				FName NewFuncName = !FunctionName.IsEmpty() ? FName(*FunctionName) : FName(*GraphName);
+				UEdGraph* NewGraph = nullptr;
+				if (UFunction* Existing = TargetBlueprint->SkeletonGeneratedClass ? TargetBlueprint->SkeletonGeneratedClass->FindFunctionByName(NewFuncName) : nullptr)
+				{
+					// Function exists; do nothing here (granular ops will handle differences)
+					return true;
+				}
+
+				// First, let's check what function signature we need from the payload
+				TArray<FBPVariableDescription> InputParams;
+				TArray<FBPVariableDescription> OutputParams;
+				
+				// Parse function entry node to get input parameters
+				const TArray<TSharedPtr<FJsonValue>>* NodesArray = nullptr;
+				if (GraphDataObj->TryGetArrayField(TEXT("Nodes"), NodesArray) && NodesArray)
+				{
+					UE_LOG(LogTemp, Log, TEXT("AddGraph: Found %d nodes in payload"), NodesArray->Num());
+					for (const TSharedPtr<FJsonValue>& NodeValue : *NodesArray)
+					{
+						if (NodeValue.IsValid() && NodeValue->Type == EJson::Object)
+						{
+							TSharedPtr<FJsonObject> NodeObj = NodeValue->AsObject();
+							FString NodeClass = NodeObj->GetStringField(TEXT("NodeClass"));
+							UE_LOG(LogTemp, Log, TEXT("AddGraph: Processing node class: %s"), *NodeClass);
+							
+							if (NodeClass.Contains(TEXT("K2Node_FunctionEntry")))
+							{
+								// Parse input parameters from function entry node
+								const TArray<TSharedPtr<FJsonValue>>* PinsArray = nullptr;
+								if (NodeObj->TryGetArrayField(TEXT("Pins"), PinsArray) && PinsArray)
+								{
+									for (const TSharedPtr<FJsonValue>& PinValue : *PinsArray)
+									{
+										if (PinValue.IsValid() && PinValue->Type == EJson::Object)
+										{
+											TSharedPtr<FJsonObject> PinObj = PinValue->AsObject();
+											FString PinName = PinObj->GetStringField(TEXT("PinName"));
+											FString PinCategory = PinObj->GetStringField(TEXT("PinType")); // SnapshotManager uses "PinType"
+											FString PinSubCategory = PinObj->GetStringField(TEXT("PinSubCategory")); // SnapshotManager captures this too
+											// Only read PinSubCategoryObject if it exists (for struct/object pins)
+											FString PinSubCategoryObject;
+											if (PinObj->HasField(TEXT("PinSubCategoryObject")))
+											{
+												PinSubCategoryObject = PinObj->GetStringField(TEXT("PinSubCategoryObject"));
+											}
+											
+											// Skip exec pins, only process data input pins
+											if (!PinCategory.IsEmpty() && PinCategory != TEXT("exec"))
+											{
+												try
+												{
+													FBPVariableDescription InputParam;
+													InputParam.VarName = FName(*PinName);
+													InputParam.VarGuid = FGuid::NewGuid();
+													
+													FEdGraphPinType PinType;
+													PinType.PinCategory = FName(*PinCategory);
+													if (!PinSubCategory.IsEmpty())
+													{
+														PinType.PinSubCategory = FName(*PinSubCategory);
+													}
+													
+													// Set PinSubCategoryObject for struct/object pins (like Vector2, Vector3, etc.)
+													if (!PinSubCategoryObject.IsEmpty())
+													{
+														// Find the UObject by name using FindFirstObject (replaces ANY_PACKAGE behavior)
+														UObject* SubCategoryObj = FindFirstObject<UObject>(*PinSubCategoryObject);
+														
+														if (SubCategoryObj)
+														{
+															PinType.PinSubCategoryObject = SubCategoryObj;
+															UE_LOG(LogTemp, Log, TEXT("AddGraph: Found PinSubCategoryObject: %s"), *PinSubCategoryObject);
+														}
+														else
+														{
+															UE_LOG(LogTemp, Warning, TEXT("AddGraph: Could not find PinSubCategoryObject: %s"), *PinSubCategoryObject);
+														}
+													}
+													
+													InputParam.VarType = PinType;
+													
+													InputParams.Add(InputParam);
+													UE_LOG(LogTemp, Log, TEXT("AddGraph: Found input parameter: %s (%s/%s/%s)"), *PinName, *PinCategory, *PinSubCategory, *PinSubCategoryObject);
+												}
+												catch (...)
+												{
+													UE_LOG(LogTemp, Warning, TEXT("AddGraph: Failed to create input parameter: %s (%s/%s/%s) - caught exception"), *PinName, *PinCategory, *PinSubCategory, *PinSubCategoryObject);
+												}
+											}
+											else
+											{
+												UE_LOG(LogTemp, Log, TEXT("AddGraph: Skipping pin '%s' - empty or exec category"), *PinName);
+											}
+										}
+									}
+								}
+							}
+							else if (NodeClass.Contains(TEXT("K2Node_FunctionResult")))
+							{
+								UE_LOG(LogTemp, Log, TEXT("AddGraph: Found K2Node_FunctionResult in payload, parsing pins..."));
+								// Parse output parameters from function result node
+								const TArray<TSharedPtr<FJsonValue>>* PinsArray = nullptr;
+								if (NodeObj->TryGetArrayField(TEXT("Pins"), PinsArray) && PinsArray)
+								{
+									UE_LOG(LogTemp, Log, TEXT("AddGraph: Found %d pins in function result node"), PinsArray->Num());
+									
+									// Log all pins first to see what we have
+									for (int32 i = 0; i < PinsArray->Num(); i++)
+									{
+										if (PinsArray->IsValidIndex(i) && (*PinsArray)[i].IsValid() && (*PinsArray)[i]->Type == EJson::Object)
+										{
+											TSharedPtr<FJsonObject> PinObj = (*PinsArray)[i]->AsObject();
+											FString PinName = PinObj->GetStringField(TEXT("PinName"));
+											FString PinType = PinObj->GetStringField(TEXT("PinType"));
+											FString Direction = PinObj->GetStringField(TEXT("Direction"));
+											UE_LOG(LogTemp, Log, TEXT("AddGraph: Pin %d - Name: '%s', Type: '%s', Direction: '%s'"), 
+												i, *PinName, *PinType, *Direction);
+										}
+									}
+									for (const TSharedPtr<FJsonValue>& PinValue : *PinsArray)
+									{
+										if (PinValue.IsValid() && PinValue->Type == EJson::Object)
+										{
+											TSharedPtr<FJsonObject> PinObj = PinValue->AsObject();
+											FString PinName = PinObj->GetStringField(TEXT("PinName"));
+											FString PinCategory = PinObj->GetStringField(TEXT("PinType")); // SnapshotManager uses "PinType"
+											FString PinSubCategory = PinObj->GetStringField(TEXT("PinSubCategory")); // SnapshotManager captures this too
+											// Only read PinSubCategoryObject if it exists (for struct/object pins)
+											FString PinSubCategoryObject;
+											if (PinObj->HasField(TEXT("PinSubCategoryObject")))
+											{
+												PinSubCategoryObject = PinObj->GetStringField(TEXT("PinSubCategoryObject"));
+											}
+											FString PinDirection = PinObj->GetStringField(TEXT("Direction")); // SnapshotManager uses "Direction"
+											
+											UE_LOG(LogTemp, Log, TEXT("AddGraph: Function result pin - Name: '%s', Category: '%s', SubCategory: '%s', SubCategoryObject: '%s', Direction: '%s'"), 
+												*PinName, *PinCategory, *PinSubCategory, *PinSubCategoryObject, *PinDirection);
+											
+											// Skip exec pins, only process data output pins
+											if (!PinCategory.IsEmpty() && PinCategory != TEXT("exec"))
+											{
+												try
+												{
+													FBPVariableDescription OutputParam;
+													OutputParam.VarName = FName(*PinName);
+													OutputParam.VarGuid = FGuid::NewGuid();
+													
+													FEdGraphPinType PinType;
+													PinType.PinCategory = FName(*PinCategory);
+													if (!PinSubCategory.IsEmpty())
+													{
+														PinType.PinSubCategory = FName(*PinSubCategory);
+													}
+													
+													// Set PinSubCategoryObject for struct/object pins (like Vector2, Vector3, etc.)
+													if (!PinSubCategoryObject.IsEmpty())
+													{
+														// Find the UObject by name using FindFirstObject (replaces ANY_PACKAGE behavior)
+														UObject* SubCategoryObj = FindFirstObject<UObject>(*PinSubCategoryObject);
+														
+														if (SubCategoryObj)
+														{
+															PinType.PinSubCategoryObject = SubCategoryObj;
+															UE_LOG(LogTemp, Log, TEXT("AddGraph: Found PinSubCategoryObject: %s"), *PinSubCategoryObject);
+														}
+														else
+														{
+															UE_LOG(LogTemp, Warning, TEXT("AddGraph: Could not find PinSubCategoryObject: %s"), *PinSubCategoryObject);
+														}
+													}
+													
+													OutputParam.VarType = PinType;
+													
+													OutputParams.Add(OutputParam);
+													UE_LOG(LogTemp, Log, TEXT("AddGraph: Found output parameter: %s (%s/%s/%s)"), *PinName, *PinCategory, *PinSubCategory, *PinSubCategoryObject);
+												}
+												catch (...)
+												{
+													UE_LOG(LogTemp, Warning, TEXT("AddGraph: Failed to create output parameter: %s (%s/%s/%s) - caught exception"), *PinName, *PinCategory, *PinSubCategory, *PinSubCategoryObject);
+												}
+											}
+											else
+											{
+												UE_LOG(LogTemp, Log, TEXT("AddGraph: Skipping output pin '%s' - empty or exec category"), *PinName);
+											}
+										}
+									}
+								}
+								else
+								{
+									UE_LOG(LogTemp, Warning, TEXT("AddGraph: No pins array found in function result node"));
+								}
+							}
+						}
+					}
+				}
+
+				// Create a new function graph
+				NewGraph = FBlueprintEditorUtils::CreateNewGraph(
+					TargetBlueprint,
+					NewFuncName,
+					UEdGraph::StaticClass(),
+					UEdGraphSchema_K2::StaticClass()
+				);
+				if (!NewGraph)
+				{
+					OutError = TEXT("Failed to create function graph");
+					return false;
+				}
+				
+				// Add the function graph with proper signature
+				FBlueprintEditorUtils::AddFunctionGraph<UClass>(TargetBlueprint, NewGraph, /*bIsUserCreated=*/ true, nullptr);
+				
+				// Set up function signature with input/output parameters
+				if (UK2Node_FunctionEntry* EntryNode = Cast<UK2Node_FunctionEntry>(NewGraph->Nodes[0]))
+				{
+					// Add input parameters to function entry
+					for (const FBPVariableDescription& InputParam : InputParams)
+					{
+						EntryNode->CreateUserDefinedPin(InputParam.VarName, InputParam.VarType, EGPD_Output);
+						UE_LOG(LogTemp, Log, TEXT("AddGraph: Added input parameter '%s' to function entry"), *InputParam.VarName.ToString());
+					}
+					EntryNode->ReconstructNode();
+				}
+				
+				// Create function result node with output parameters
+				UE_LOG(LogTemp, Log, TEXT("AddGraph: Found %d output parameters"), OutputParams.Num());
+				
+				// Use the original order from JSON payload (should match Blueprint creation order)
+				
+				// Find the function result node data from payload to get position
+				FVector2D ResultNodePosition = FVector2D::ZeroVector;
+				if (GraphDataObj->TryGetArrayField(TEXT("Nodes"), NodesArray) && NodesArray)
+				{
+					for (const TSharedPtr<FJsonValue>& NodeValue : *NodesArray)
+					{
+						if (NodeValue.IsValid() && NodeValue->Type == EJson::Object)
+						{
+							TSharedPtr<FJsonObject> NodeObj = NodeValue->AsObject();
+							FString NodeClass = NodeObj->GetStringField(TEXT("NodeClass"));
+							
+							if (NodeClass.Contains(TEXT("K2Node_FunctionResult")))
+							{
+								// Get position from payload
+								ResultNodePosition.X = NodeObj->GetNumberField(TEXT("NodePosX"));
+								ResultNodePosition.Y = NodeObj->GetNumberField(TEXT("NodePosY"));
+								UE_LOG(LogTemp, Log, TEXT("AddGraph: Found function result node position: X=%.0f, Y=%.0f"), ResultNodePosition.X, ResultNodePosition.Y);
+								break;
+							}
+						}
+					}
+				}
+				
+				// Always create a function result node since connections expect it
+				UK2Node_FunctionResult* ResultNode = NewObject<UK2Node_FunctionResult>(NewGraph);
+				if (ResultNode)
+				{
+					NewGraph->AddNode(ResultNode);
+					
+					// Set the node position from payload
+					ResultNode->NodePosX = ResultNodePosition.X;
+					ResultNode->NodePosY = ResultNodePosition.Y;
+					UE_LOG(LogTemp, Log, TEXT("AddGraph: Set function result node position: X=%.0f, Y=%.0f"), ResultNodePosition.X, ResultNodePosition.Y);
+					
+					if (OutputParams.Num() > 0)
+					{
+						// Add output parameters to function result in original order
+						for (const FBPVariableDescription& OutputParam : OutputParams)
+						{
+							ResultNode->CreateUserDefinedPin(OutputParam.VarName, OutputParam.VarType, EGPD_Input);
+							UE_LOG(LogTemp, Log, TEXT("AddGraph: Added output parameter '%s' to function result"), *OutputParam.VarName.ToString());
+						}
+						UE_LOG(LogTemp, Log, TEXT("AddGraph: Successfully created function result node with %d output parameters"), OutputParams.Num());
+					}
+					else
+					{
+						// Create a default "CanPrint" pin since that's what the connections expect
+						FEdGraphPinType BoolPinType;
+						BoolPinType.PinCategory = FName(TEXT("bool"));
+						ResultNode->CreateUserDefinedPin(FName(TEXT("CanPrint")), BoolPinType, EGPD_Input);
+						UE_LOG(LogTemp, Log, TEXT("AddGraph: Created function result node with default 'CanPrint' pin"));
+					}
+					
+					ResultNode->ReconstructNode();
+				}
+				else
+				{
+					UE_LOG(LogTemp, Warning, TEXT("AddGraph: Failed to create function result node"));
+				}
+				
+				FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(TargetBlueprint);
+
+
+				// Recreate nodes from payload
+				if (GraphDataObj->TryGetArrayField(TEXT("Nodes"), NodesArray) && NodesArray)
+				{
+					for (const TSharedPtr<FJsonValue>& NodeValue : *NodesArray)
+					{
+						if (NodeValue.IsValid() && NodeValue->Type == EJson::Object)
+						{
+							TSharedPtr<FJsonObject> NodeObj = NodeValue->AsObject();
+							FString NodeClass = NodeObj->GetStringField(TEXT("NodeClass"));
+							
+							// Skip function entry nodes as they're automatically created by AddFunctionGraph
+							if (NodeClass.Contains(TEXT("K2Node_FunctionEntry")))
+							{
+								UE_LOG(LogTemp, Log, TEXT("AddGraph: Skipping %s node (auto-created)"), *NodeClass);
+								continue;
+							}
+							
+							// Skip function result nodes as they're now created with proper signature
+							if (NodeClass.Contains(TEXT("K2Node_FunctionResult")))
+							{
+								UE_LOG(LogTemp, Log, TEXT("AddGraph: Skipping %s node (created with function signature)"), *NodeClass);
+								continue;
+							}
+							
+							FString NodeError;
+							if (!AddNode(TargetBlueprint, NewFuncName.ToString(), NodeObj, NodeError))
+							{
+								UE_LOG(LogTemp, Warning, TEXT("AddGraph: Failed to add node to function %s: %s"), *NewFuncName.ToString(), *NodeError);
+							}
+						}
+					}
+				}
+
+				// Log all nodes in the graph for debugging
+				UE_LOG(LogTemp, Log, TEXT("AddGraph: Current nodes in graph '%s':"), *NewFuncName.ToString());
+				for (UEdGraphNode* Node : NewGraph->Nodes)
+				{
+					if (Node)
+					{
+						FString NodeTitle = Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
+						UE_LOG(LogTemp, Log, TEXT("  Node: %s, Title: '%s'"), *Node->GetName(), *NodeTitle);
+					}
+				}
+
+				// Recreate connections from payload (after all nodes exist)
+				const TArray<TSharedPtr<FJsonValue>>* ConnsArray = nullptr;
+				if (GraphDataObj->TryGetArrayField(TEXT("Connections"), ConnsArray) && ConnsArray)
+				{
+					// Helper to find node object in payload by GUID
+					auto FindNodeJsonByGuid = [&](const FString& Guid) -> TSharedPtr<FJsonObject>
+					{
+						const TArray<TSharedPtr<FJsonValue>>* PayloadNodes = nullptr;
+						if (GraphDataObj->TryGetArrayField(TEXT("Nodes"), PayloadNodes) && PayloadNodes)
+						{
+							for (const TSharedPtr<FJsonValue>& NodeValue : *PayloadNodes)
+							{
+								if (NodeValue.IsValid() && NodeValue->Type == EJson::Object)
+								{
+									TSharedPtr<FJsonObject> NodeObj = NodeValue->AsObject();
+									if (NodeObj->GetStringField(TEXT("NodeGuid")) == Guid)
+									{
+										return NodeObj;
+									}
+								}
+							}
+						}
+						return nullptr;
+					};
+
+					// Helper to resolve node by GUID first, then by NodeTitle if GUID lookup fails
+					auto ResolveNodeByGuidOrTitle = [&](const FString& Guid, const FString& Title) -> UEdGraphNode*
+					{
+						UEdGraphNode* Found = FindNodeByGuid(NewGraph, Guid);
+						if (Found)
+						{
+							UE_LOG(LogTemp, Log, TEXT("AddGraph: Found node by GUID: %s"), *Found->GetName());
+							return Found;
+						}
+						
+						// Fallback to title-based matching when GUIDs are unstable
+						UE_LOG(LogTemp, Log, TEXT("AddGraph: GUID lookup failed for %s, trying title-based matching: '%s'"), *Guid, *Title);
+						
+						for (UEdGraphNode* Node : NewGraph->Nodes)
+						{
+							if (Node)
+							{
+								FString NodeTitle = Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
+								UE_LOG(LogTemp, Log, TEXT("AddGraph: Checking node '%s' with title '%s'"), *Node->GetName(), *NodeTitle);
+								
+								if (NodeTitle == Title)
+								{
+									UE_LOG(LogTemp, Log, TEXT("AddGraph: Found node by title: %s"), *Node->GetName());
+									return Node;
+								}
+							}
+						}
+						
+						UE_LOG(LogTemp, Warning, TEXT("AddGraph: Failed to resolve node with GUID %s or title '%s'"), *Guid, *Title);
+						return nullptr;
+					};
+
+					for (const TSharedPtr<FJsonValue>& ConnValue : *ConnsArray)
+					{
+						if (ConnValue.IsValid() && ConnValue->Type == EJson::Object)
+						{
+							TSharedPtr<FJsonObject> ConnObj = ConnValue->AsObject();
+							FString SourceNodeGuid = ConnObj->GetStringField(TEXT("SourceNodeGuid"));
+							FString SourcePinName = ConnObj->GetStringField(TEXT("SourcePinName"));
+							FString TargetNodeGuid = ConnObj->GetStringField(TEXT("TargetNodeGuid"));
+							FString TargetPinName = ConnObj->GetStringField(TEXT("TargetPinName"));
+
+#if BPT_MERGE_USE_GUID_MATCHING
+							FString LinkError;
+							if (!LinkPins(TargetBlueprint, NewFuncName.ToString(), SourceNodeGuid, SourcePinName, TargetNodeGuid, TargetPinName, LinkError))
+							{
+								UE_LOG(LogTemp, Warning, TEXT("AddGraph: Failed to link pins in function %s: %s -> %s (%s)"), *NewFuncName.ToString(), *SourcePinName, *TargetPinName, *LinkError);
+							}
+#else
+							// Name/semantic-based fallback
+							TSharedPtr<FJsonObject> SrcNodeJson = FindNodeJsonByGuid(SourceNodeGuid);
+							TSharedPtr<FJsonObject> DstNodeJson = FindNodeJsonByGuid(TargetNodeGuid);
+							FString SrcTitle = SrcNodeJson.IsValid() ? SrcNodeJson->GetStringField(TEXT("NodeTitle")) : TEXT("");
+							FString DstTitle = DstNodeJson.IsValid() ? DstNodeJson->GetStringField(TEXT("NodeTitle")) : TEXT("");
+
+							UEdGraphNode* SrcNode = ResolveNodeByGuidOrTitle(SourceNodeGuid, SrcTitle);
+							UEdGraphNode* DstNode = ResolveNodeByGuidOrTitle(TargetNodeGuid, DstTitle);
+
+							if (!SrcNode || !DstNode)
+							{
+								UE_LOG(LogTemp, Warning, TEXT("AddGraph: Fallback link failed to resolve nodes. Src(%s:%s) Dst(%s:%s)"), *SourceNodeGuid, *SrcTitle, *TargetNodeGuid, *DstTitle);
+								continue;
+							}
+
+							UEdGraphPin* SourcePin = FindPin(SrcNode, TEXT(""), SourcePinName);
+							UEdGraphPin* TargetPin = FindPin(DstNode, TEXT(""), TargetPinName);
+
+							if (!SourcePin || !TargetPin)
+							{
+								// Fallback: normalize names (remove spaces/underscores, lowercase) and retry
+								auto Normalize = [](const FString& In) -> FString
+								{
+									FString S = In;
+									S.ReplaceInline(TEXT(" "), TEXT(""));
+									S.ReplaceInline(TEXT("_"), TEXT(""));
+									return S.ToLower();
+								};
+								FString SrcNorm = Normalize(SourcePinName);
+								FString DstNorm = Normalize(TargetPinName);
+
+								auto FindPinNormalized = [&](UEdGraphNode* Node, const FString& WantNorm) -> UEdGraphPin*
+								{
+									for (UEdGraphPin* P : Node->Pins)
+									{
+										if (!P) { continue; }
+										if (Normalize(P->PinName.ToString()) == WantNorm)
+										{
+											return P;
+										}
+									}
+									return (UEdGraphPin*)nullptr;
+								};
+
+								if (!SourcePin)
+								{
+									SourcePin = FindPinNormalized(SrcNode, SrcNorm);
+								}
+								if (!TargetPin)
+								{
+									TargetPin = FindPinNormalized(DstNode, DstNorm);
+								}
+
+								if (!SourcePin || !TargetPin)
+								{
+									OutError = FString::Printf(TEXT("Source pin '%s' or target pin '%s' not found (after normalized fallback)"), *SourcePinName, *TargetPinName);
+									return false;
+								}
+							}
+
+							if (NewGraph->GetSchema()->CanCreateConnection(SourcePin, TargetPin).Response == CONNECT_RESPONSE_MAKE)
+							{
+								SourcePin->MakeLinkTo(TargetPin);
+							}
+							else
+							{
+								UE_LOG(LogTemp, Warning, TEXT("AddGraph: Fallback cannot connect pins %s -> %s (incompatible)"), *SourcePinName, *TargetPinName);
+							}
+#endif
+						}
+					}
+				}
+
+				return true;
+			}
+
+			// Non-function graphs not supported yet in one-shot path
+			OutError = TEXT("AddGraph only supports Function graphs currently");
 			return false;
 		}
 
@@ -472,7 +1024,7 @@ bool FApplyEngine::AddVariable(
 		return false;
 	}
 
-	// Check if variable already exists
+	// Check if variable already exists (name-based conflict detection)
 	for (const FBPVariableDescription& ExistingVar : Blueprint->NewVariables)
 	{
 		if (ExistingVar.VarName.ToString() == VarName)
@@ -499,6 +1051,13 @@ bool FApplyEngine::AddVariable(
 	// Get subcategory from the captured data
 	FString VarSubCategory = VariableData->GetStringField(TEXT("VarSubCategory"));
 	
+	// Only read VarSubCategoryObject if it exists (for struct/object variables)
+	FString VarSubCategoryObject;
+	if (VariableData->HasField(TEXT("VarSubCategoryObject")))
+	{
+		VarSubCategoryObject = VariableData->GetStringField(TEXT("VarSubCategoryObject"));
+	}
+	
 	// Set variable type with proper subcategory
 	// Handle both user-friendly names and Unreal Engine pin categories
 	if (VarType == TEXT("int") || VarType == TEXT("Int") || VarType == TEXT("PC_Int"))
@@ -521,6 +1080,30 @@ bool FApplyEngine::AddVariable(
 		NewVariable.VarType.PinCategory = UEdGraphSchema_K2::PC_String;
 		NewVariable.VarType.PinSubCategory = NAME_None;
 	}
+	else if (VarType == TEXT("object") || VarType == TEXT("Object") || VarType == TEXT("PC_Object"))
+	{
+		NewVariable.VarType.PinCategory = UEdGraphSchema_K2::PC_Object;
+		NewVariable.VarType.PinSubCategory = NAME_None;
+		// PinSubCategoryObject will be set separately if provided
+	}
+	else if (VarType == TEXT("class") || VarType == TEXT("Class") || VarType == TEXT("PC_Class"))
+	{
+		NewVariable.VarType.PinCategory = UEdGraphSchema_K2::PC_Class;
+		NewVariable.VarType.PinSubCategory = NAME_None;
+		// PinSubCategoryObject will be set separately if provided
+	}
+	else if (VarType == TEXT("struct") || VarType == TEXT("Struct") || VarType == TEXT("PC_Struct"))
+	{
+		NewVariable.VarType.PinCategory = UEdGraphSchema_K2::PC_Struct;
+		NewVariable.VarType.PinSubCategory = NAME_None;
+		// PinSubCategoryObject will be set separately if provided
+	}
+	else if (VarType == TEXT("interface") || VarType == TEXT("Interface") || VarType == TEXT("PC_Interface"))
+	{
+		NewVariable.VarType.PinCategory = UEdGraphSchema_K2::PC_Interface;
+		NewVariable.VarType.PinSubCategory = NAME_None;
+		// PinSubCategoryObject will be set separately if provided
+	}
 	else
 	{
 		// Try to use the captured pin category directly
@@ -528,6 +1111,23 @@ bool FApplyEngine::AddVariable(
 		NewVariable.VarType.PinSubCategory = VarSubCategory.IsEmpty() ? NAME_None : FName(*VarSubCategory);
 		
 		UE_LOG(LogTemp, Log, TEXT("ApplyEngine: Using captured pin type - Category: %s, SubCategory: %s"), *VarType, *VarSubCategory);
+	}
+
+	// Set PinSubCategoryObject for struct/object/class/interface pins
+	if (!VarSubCategoryObject.IsEmpty())
+	{
+		// Find the UObject by name using FindFirstObject (replaces ANY_PACKAGE behavior)
+		UObject* SubCategoryObj = FindFirstObject<UObject>(*VarSubCategoryObject);
+		
+		if (SubCategoryObj)
+		{
+			NewVariable.VarType.PinSubCategoryObject = SubCategoryObj;
+			UE_LOG(LogTemp, Log, TEXT("ApplyEngine: Set PinSubCategoryObject to: %s"), *VarSubCategoryObject);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("ApplyEngine: Could not find VarSubCategoryObject: %s"), *VarSubCategoryObject);
+		}
 	}
 
 	// Set other properties
@@ -880,8 +1480,28 @@ bool FApplyEngine::LinkPins(
 	UEdGraphNode* SourceNode = FindNodeByGuid(TargetGraph, SourceNodeGuid);
 	UEdGraphNode* TargetNode = FindNodeByGuid(TargetGraph, TargetNodeGuid);
 
+	// Debug logging
+	UE_LOG(LogTemp, Log, TEXT("LinkPins: Looking for nodes - Source: %s, Target: %s"), *SourceNodeGuid, *TargetNodeGuid);
+	UE_LOG(LogTemp, Log, TEXT("LinkPins: Found nodes - Source: %s, Target: %s"), 
+		SourceNode ? *SourceNode->GetName() : TEXT("NULL"), 
+		TargetNode ? *TargetNode->GetName() : TEXT("NULL"));
+
 	if (!SourceNode || !TargetNode)
 	{
+		// List all available nodes for debugging
+		UE_LOG(LogTemp, Warning, TEXT("LinkPins: Available nodes in graph '%s':"), *GraphName);
+		for (UEdGraphNode* Node : TargetGraph->Nodes)
+		{
+			if (UK2Node* K2Node = Cast<UK2Node>(Node))
+			{
+				UE_LOG(LogTemp, Warning, TEXT("  Node: %s, GUID: %s"), *Node->GetName(), *K2Node->NodeGuid.ToString());
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("  Node: %s (not a K2Node)"), *Node->GetName());
+			}
+		}
+		
 		OutError = TEXT("Source or target node not found for pin linking");
 		return false;
 	}
@@ -891,8 +1511,58 @@ bool FApplyEngine::LinkPins(
 
 	if (!SourcePin || !TargetPin)
 	{
-		OutError = FString::Printf(TEXT("Source pin '%s' or target pin '%s' not found"), *SourcePinName, *TargetPinName);
-		return false;
+		// Fallback: Try to find pins by normalized names (remove spaces/underscores, lowercase)
+		FString NormalizedSourcePinName = SourcePinName.Replace(TEXT(" "), TEXT("")).Replace(TEXT("_"), TEXT("")).ToLower();
+		FString NormalizedTargetPinName = TargetPinName.Replace(TEXT(" "), TEXT("")).Replace(TEXT("_"), TEXT("")).ToLower();
+
+		UE_LOG(LogTemp, Log, TEXT("LinkPins: Trying normalized fallback - Source: '%s' -> '%s', Target: '%s' -> '%s'"), 
+			*SourcePinName, *NormalizedSourcePinName, *TargetPinName, *NormalizedTargetPinName);
+
+		for (UEdGraphPin* Pin : SourceNode->Pins)
+		{
+			FString NormalizedExistingPinName = Pin->PinName.ToString().Replace(TEXT(" "), TEXT("")).Replace(TEXT("_"), TEXT("")).ToLower();
+			if (NormalizedExistingPinName == NormalizedSourcePinName)
+			{
+				SourcePin = Pin;
+				UE_LOG(LogTemp, Log, TEXT("LinkPins: Found source pin with normalized name: '%s' -> '%s'"), *Pin->PinName.ToString(), *NormalizedExistingPinName);
+				break;
+			}
+		}
+
+		for (UEdGraphPin* Pin : TargetNode->Pins)
+		{
+			FString NormalizedExistingPinName = Pin->PinName.ToString().Replace(TEXT(" "), TEXT("")).Replace(TEXT("_"), TEXT("")).ToLower();
+			if (NormalizedExistingPinName == NormalizedTargetPinName)
+			{
+				TargetPin = Pin;
+				UE_LOG(LogTemp, Log, TEXT("LinkPins: Found target pin with normalized name: '%s' -> '%s'"), *Pin->PinName.ToString(), *NormalizedExistingPinName);
+				break;
+			}
+		}
+
+		if (!SourcePin || !TargetPin)
+		{
+			// List all available pins for debugging
+			UE_LOG(LogTemp, Warning, TEXT("LinkPins: Available pins on source node '%s':"), *SourceNode->GetName());
+			for (UEdGraphPin* Pin : SourceNode->Pins)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("  Pin: '%s' (normalized: '%s')"), *Pin->PinName.ToString(), 
+					*Pin->PinName.ToString().Replace(TEXT(" "), TEXT("")).Replace(TEXT("_"), TEXT("")).ToLower());
+			}
+			UE_LOG(LogTemp, Warning, TEXT("LinkPins: Available pins on target node '%s':"), *TargetNode->GetName());
+			for (UEdGraphPin* Pin : TargetNode->Pins)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("  Pin: '%s' (normalized: '%s')"), *Pin->PinName.ToString(), 
+					*Pin->PinName.ToString().Replace(TEXT(" "), TEXT("")).Replace(TEXT("_"), TEXT("")).ToLower());
+			}
+			
+			OutError = FString::Printf(TEXT("Source pin '%s' or target pin '%s' not found (after normalized fallback)"), *SourcePinName, *TargetPinName);
+			return false;
+		}
+		else
+		{
+			UE_LOG(LogTemp, Log, TEXT("LinkPins: Successfully found pins with normalized names: %s -> %s"), *SourcePinName, *TargetPinName);
+		}
 	}
 
 	// Check compatibility
@@ -1286,11 +1956,15 @@ UEdGraphNode* FApplyEngine::CreateNodeFromData(
 		
 		// Set function reference if provided
 		FString FunctionName = NodeData->GetStringField(TEXT("FunctionName"));
+		FString FunctionClass = NodeData->GetStringField(TEXT("FunctionClass"));
+		
+		UE_LOG(LogTemp, Log, TEXT("CreateNodeFromData: Creating CallFunction node - FunctionName: %s, FunctionClass: %s"), 
+			*FunctionName, *FunctionClass);
+		
 		if (!FunctionName.IsEmpty())
 		{
 			// Try to find the function
 			UFunction* Function = nullptr;
-			FString FunctionClass = NodeData->GetStringField(TEXT("FunctionClass"));
 			
 			if (!FunctionClass.IsEmpty())
 			{
@@ -1298,12 +1972,50 @@ UEdGraphNode* FApplyEngine::CreateNodeFromData(
 				if (OwnerClass)
 				{
 					Function = OwnerClass->FindFunctionByName(FName(*FunctionName));
+					UE_LOG(LogTemp, Log, TEXT("CreateNodeFromData: Found function in class %s: %s"), 
+						*FunctionClass, Function ? TEXT("YES") : TEXT("NO"));
+				}
+				else
+				{
+					UE_LOG(LogTemp, Warning, TEXT("CreateNodeFromData: Could not find class %s"), *FunctionClass);
+				}
+			}
+			else
+			{
+				// Try to find in common classes if no specific class provided
+				// For Print functions, try UKismetSystemLibrary
+				if (FunctionName.Contains(TEXT("Print")))
+				{
+					UClass* SystemLibrary = FindObject<UClass>(nullptr, TEXT("/Script/Engine.KismetSystemLibrary"));
+					if (SystemLibrary)
+					{
+						Function = SystemLibrary->FindFunctionByName(FName(*FunctionName));
+						UE_LOG(LogTemp, Log, TEXT("CreateNodeFromData: Found Print function in KismetSystemLibrary: %s"), 
+							Function ? TEXT("YES") : TEXT("NO"));
+					}
+				}
+			}
+			
+			// If still not found and FunctionClass is "KismetSystemLibrary", try the full path
+			if (!Function && FunctionClass == TEXT("KismetSystemLibrary"))
+			{
+				UClass* SystemLibrary = FindObject<UClass>(nullptr, TEXT("/Script/Engine.KismetSystemLibrary"));
+				if (SystemLibrary)
+				{
+					Function = SystemLibrary->FindFunctionByName(FName(*FunctionName));
+					UE_LOG(LogTemp, Log, TEXT("CreateNodeFromData: Found function %s in UKismetSystemLibrary: %s"), 
+						*FunctionName, Function ? TEXT("YES") : TEXT("NO"));
 				}
 			}
 
 			if (Function)
 			{
 				CallFunctionNode->SetFromFunction(Function);
+				UE_LOG(LogTemp, Log, TEXT("CreateNodeFromData: Successfully set function reference"));
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("CreateNodeFromData: Could not find function %s in class %s"), *FunctionName, *FunctionClass);
 			}
 		}
 
@@ -1332,6 +2044,106 @@ UEdGraphNode* FApplyEngine::CreateNodeFromData(
 		}
 
 		NewNode = CustomEventNode;
+	}
+	else if (NodeClass.Contains(TEXT("K2Node_FunctionEntry")))
+	{
+		UK2Node_FunctionEntry* FunctionEntryNode = NewObject<UK2Node_FunctionEntry>(Graph);
+		
+		// Function entry nodes are automatically created when the function graph is created
+		// We just need to position it correctly
+		NewNode = FunctionEntryNode;
+	}
+	else if (NodeClass.Contains(TEXT("K2Node_VariableGet")))
+	{
+		UK2Node_VariableGet* VariableGetNode = NewObject<UK2Node_VariableGet>(Graph);
+		
+		// Set variable reference if provided
+		FString VariableName = NodeData->GetStringField(TEXT("VariableName"));
+		FString VariableGuid = NodeData->GetStringField(TEXT("VariableGuid"));
+		
+		if (!VariableName.IsEmpty())
+		{
+			// Try to find the variable in the blueprint
+			if (UBlueprint* Blueprint = Cast<UBlueprint>(Graph->GetOuter()))
+			{
+				for (FBPVariableDescription& Var : Blueprint->NewVariables)
+				{
+					if (Var.VarName.ToString() == VariableName)
+					{
+						// In UE 5.5, set the variable reference using the variable name
+						VariableGetNode->VariableReference.SetSelfMember(Var.VarName);
+						break;
+					}
+				}
+			}
+		}
+		
+		NewNode = VariableGetNode;
+	}
+	else if (NodeClass.Contains(TEXT("K2Node_FunctionResult")))
+	{
+		UK2Node_FunctionResult* FunctionResultNode = NewObject<UK2Node_FunctionResult>(Graph);
+		
+		// Function result nodes are automatically created when the function graph is created
+		// We just need to position it correctly
+		NewNode = FunctionResultNode;
+
+		// Add output pins from payload if provided (e.g., return parameters)
+		const TArray<TSharedPtr<FJsonValue>>* PinsArray = nullptr;
+		if (NodeData->TryGetArrayField(TEXT("Pins"), PinsArray) && PinsArray)
+		{
+			// Ensure default pins (Exec) exist
+			for (const TSharedPtr<FJsonValue>& PinValue : *PinsArray)
+			{
+				if (!PinValue.IsValid() || PinValue->Type != EJson::Object)
+				{
+					continue;
+				}
+				TSharedPtr<FJsonObject> PinObj = PinValue->AsObject();
+				FString PinName = PinObj->GetStringField(TEXT("PinName"));
+				FString PinDirection = PinObj->GetStringField(TEXT("Direction")); // "Input" or "Output"
+				FString PinCategory = PinObj->GetStringField(TEXT("PinType")); // matches CapturePins
+
+				// Only add data pins (skip exec pins)
+				if (PinCategory.Equals(TEXT("exec"), ESearchCase::IgnoreCase))
+				{
+					continue;
+				}
+
+				// For FunctionResult, user-defined data pins are INPUT pins on the Return node
+				EEdGraphPinDirection Dir = EGPD_Input;
+
+				// Map common pin categories
+				FName SchemaType = UEdGraphSchema_K2::PC_Wildcard;
+				if (PinCategory.Equals(TEXT("bool"), ESearchCase::IgnoreCase))
+				{
+					SchemaType = UEdGraphSchema_K2::PC_Boolean;
+				}
+				else if (PinCategory.Equals(TEXT("int"), ESearchCase::IgnoreCase))
+				{
+					SchemaType = UEdGraphSchema_K2::PC_Int;
+				}
+				else if (PinCategory.Equals(TEXT("float"), ESearchCase::IgnoreCase) || PinCategory.Equals(TEXT("real"), ESearchCase::IgnoreCase))
+				{
+					SchemaType = UEdGraphSchema_K2::PC_Float;
+				}
+				else if (PinCategory.Equals(TEXT("string"), ESearchCase::IgnoreCase))
+				{
+					SchemaType = UEdGraphSchema_K2::PC_String;
+				}
+
+				// UE5.5+: Create pins via FEdGraphPinType
+				FEdGraphPinType PinType;
+				PinType.PinCategory = SchemaType;
+				UEdGraphPin* CreatedPin = FunctionResultNode->CreatePin(Dir, PinType, *PinName);
+				if (!CreatedPin)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("CreateNodeFromData: Failed to create result pin %s"), *PinName);
+				}
+			}
+			// Refresh node after adding pins
+			FunctionResultNode->ReconstructNode();
+		}
 	}
 	else
 	{
@@ -1441,6 +2253,7 @@ bool FApplyEngine::UpdateVariableReferences(
 		UpdateCount, *OldGuid, *NewGuid);
 	return true;
 }
+
 
 bool FApplyEngine::EnsureGameThread(TFunction<bool()> Operation)
 {
@@ -1632,7 +2445,7 @@ bool FApplyEngine::AddVariableFromStructuredData(
 	UE_LOG(LogTemp, Log, TEXT("ApplyEngine: Adding variable from structured data - Name: %s, Type: %s"), 
 		*VariableData.VariableName.ToString(), *VariableData.VarType.PinCategory.ToString());
 
-	// Check if variable already exists
+	// Check if variable already exists (name-based conflict detection)
 	for (const FBPVariableDescription& ExistingVar : Blueprint->NewVariables)
 	{
 		if (ExistingVar.VarName == VariableData.VariableName)

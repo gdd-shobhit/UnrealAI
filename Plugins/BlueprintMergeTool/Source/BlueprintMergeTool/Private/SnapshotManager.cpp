@@ -7,6 +7,7 @@
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
 #include "K2Node_CustomEvent.h"
+#include "K2Node_FunctionEntry.h"
 #include "K2Node_Timeline.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraph/EdGraph.h"
@@ -136,8 +137,15 @@ void FSnapshotManager::CaptureVariables(UBlueprint* Blueprint, TArray<TSharedPtr
 		VariableObject->SetStringField(TEXT("VarType"), Variable.VarType.PinCategory.ToString());
 		VariableObject->SetStringField(TEXT("VarSubCategory"), Variable.VarType.PinSubCategory.ToString());
 		
-		UE_LOG(LogTemp, VeryVerbose, TEXT("SnapshotManager: Captured variable - Name: %s, Type: %s, SubType: %s"), 
-			*Variable.VarName.ToString(), *Variable.VarType.PinCategory.ToString(), *Variable.VarType.PinSubCategory.ToString());
+		// Capture VarSubCategoryObject for struct/object/class/interface variables
+		if (Variable.VarType.PinSubCategoryObject.IsValid())
+		{
+			VariableObject->SetStringField(TEXT("VarSubCategoryObject"), Variable.VarType.PinSubCategoryObject->GetName());
+		}
+		
+		UE_LOG(LogTemp, VeryVerbose, TEXT("SnapshotManager: Captured variable - Name: %s, Type: %s, SubType: %s, SubTypeObject: %s"), 
+			*Variable.VarName.ToString(), *Variable.VarType.PinCategory.ToString(), *Variable.VarType.PinSubCategory.ToString(),
+			Variable.VarType.PinSubCategoryObject.IsValid() ? *Variable.VarType.PinSubCategoryObject->GetName() : TEXT("None"));
 		
 		// Variable flags
 		VariableObject->SetBoolField(TEXT("bExposeOnSpawn"), (Variable.PropertyFlags & CPF_ExposeOnSpawn) != 0);
@@ -231,22 +239,38 @@ void FSnapshotManager::CaptureGraph(UEdGraph* Graph, TSharedPtr<FJsonObject>& Ou
 	OutGraphObject->SetStringField(TEXT("GraphGuid"), Graph->GraphGuid.ToString());
 	OutGraphObject->SetStringField(TEXT("GraphSchema"), Graph->Schema ? Graph->Schema->GetName() : TEXT(""));
 
-	// Graph type classification
+	// Graph type classification (prefer structural detection)
 	FString GraphType = TEXT("Unknown");
-	if (Graph->GetName().Contains(TEXT("EventGraph")))
+	bool bIsFunctionGraph = false;
+	UK2Node_FunctionEntry* DetectedFunctionEntry = nullptr;
+	for (UEdGraphNode* Node : Graph->Nodes)
+	{
+		if (UK2Node_FunctionEntry* Entry = Cast<UK2Node_FunctionEntry>(Node))
+		{
+			DetectedFunctionEntry = Entry;
+			bIsFunctionGraph = true;
+			break;
+		}
+	}
+
+	if (bIsFunctionGraph)
+	{
+		GraphType = TEXT("Function");
+		// Derive a stable function identifier; prefer graph name for compatibility across engine versions
+		FString FunctionName = Graph->GetName();
+		if (FunctionName.IsEmpty())
+		{
+			FunctionName = DetectedFunctionEntry->GetNodeTitle(ENodeTitleType::ListView).ToString();
+		}
+		OutGraphObject->SetStringField(TEXT("FunctionName"), FunctionName);
+	}
+	else if (Graph->GetName().Contains(TEXT("EventGraph")))
 	{
 		GraphType = TEXT("EventGraph");
 	}
 	else if (Graph->GetName().Contains(TEXT("ConstructionScript")))
 	{
 		GraphType = TEXT("ConstructionScript");
-	}
-	else if (UBlueprint* Blueprint = Cast<UBlueprint>(Graph->GetOuter()))
-	{
-		if (FBlueprintEditorUtils::IsGraphNameUnique(Blueprint, Graph->GetFName()))
-		{
-			GraphType = TEXT("Function");
-		}
 	}
 	OutGraphObject->SetStringField(TEXT("GraphType"), GraphType);
 
@@ -393,6 +417,12 @@ void FSnapshotManager::CapturePins(UEdGraphNode* Node, TArray<TSharedPtr<FJsonVa
 		PinObject->SetStringField(TEXT("PinType"), Pin->PinType.PinCategory.ToString());
 		PinObject->SetStringField(TEXT("PinSubCategory"), Pin->PinType.PinSubCategory.ToString());
 		PinObject->SetStringField(TEXT("Direction"), Pin->Direction == EGPD_Input ? TEXT("Input") : TEXT("Output"));
+		
+		// Capture PinSubCategoryObject for struct/object pins (like Vector2, Vector3, etc.)
+		if (Pin->PinType.PinSubCategoryObject.IsValid())
+		{
+			PinObject->SetStringField(TEXT("PinSubCategoryObject"), Pin->PinType.PinSubCategoryObject->GetName());
+		}
 		
 		// Default value
 		if (!Pin->DefaultValue.IsEmpty())

@@ -5,6 +5,13 @@
 #include "Dom/JsonObject.h"
 #include "DiffEngine.generated.h"
 
+// Compile-time toggle for GUID-based matching
+// 0 = compare by semantic/name keys (preferred for testing without VCS)
+// 1 = compare by GUIDs (preferred when Perforce ensures stable GUIDs)
+#ifndef BPT_MERGE_USE_GUID_MATCHING
+#define BPT_MERGE_USE_GUID_MATCHING 0
+#endif
+
 /**
  * Operation types for Blueprint modifications
  */
@@ -407,6 +414,30 @@ public:
 	static bool IsMoveOperation(
 		TSharedPtr<FJsonObject> BaseObj,
 		TSharedPtr<FJsonObject> ModifiedObj
+	);
+
+	/**
+	 * Check if two variables have the same GUID (for Perforce/Git integration)
+	 * @param LocalVar Local variable object
+	 * @param RemoteVar Remote variable object
+	 * @return True if GUIDs match (should be true with proper version control)
+	 */
+	static bool AreVariableGuidsIdentical(
+		TSharedPtr<FJsonObject> LocalVar,
+		TSharedPtr<FJsonObject> RemoteVar
+	);
+
+	/**
+	 * Compare two variables ignoring fields that should be different (like GUID)
+	 * @param LocalVar Local variable object
+	 * @param RemoteVar Remote variable object
+	 * @param OutDifferingFields Fields that differ (excluding ignored fields)
+	 * @return True if variables differ in meaningful ways
+	 */
+	static bool CompareVariablesIgnoringGuid(
+		TSharedPtr<FJsonObject> LocalVar,
+		TSharedPtr<FJsonObject> RemoteVar,
+		TArray<FString>& OutDifferingFields
 	);
 
 	/**

@@ -439,6 +439,14 @@ void FSnapshotManager::CapturePins(UEdGraphNode* Node, TArray<TSharedPtr<FJsonVa
 		{
 			PinObject->SetStringField(TEXT("DefaultValue"), Pin->DefaultValue);
 		}
+		
+		// Default object reference (for object/class pins)
+		if (IsValid(Pin->DefaultObject))
+		{
+			PinObject->SetStringField(TEXT("DefaultObject"), Pin->DefaultObject->GetPathName());
+			UE_LOG(LogTemp, VeryVerbose, TEXT("SnapshotManager: Captured pin default object - Pin: %s, Object: %s"), 
+				*Pin->PinName.ToString(), *Pin->DefaultObject->GetPathName());
+		}
 
 		// Pin flags
 		PinObject->SetBoolField(TEXT("bHidden"), Pin->bHidden);

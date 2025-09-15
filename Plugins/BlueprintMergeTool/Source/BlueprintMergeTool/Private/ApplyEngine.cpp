@@ -1995,34 +1995,7 @@ UEdGraphNode* FApplyEngine::CreateNodeFromData(
 					UE_LOG(LogTemp, Warning, TEXT("CreateNodeFromData: Could not find class %s"), *FunctionClass);
 				}
 			}
-			else
-			{
-				// Try to find in common classes if no specific class provided
-				// For Print functions, try UKismetSystemLibrary
-				if (FunctionName.Contains(TEXT("Print")))
-				{
-					UClass* SystemLibrary = FindObject<UClass>(nullptr, TEXT("/Script/Engine.KismetSystemLibrary"));
-					if (SystemLibrary)
-					{
-						Function = SystemLibrary->FindFunctionByName(FName(*FunctionName));
-						UE_LOG(LogTemp, Log, TEXT("CreateNodeFromData: Found Print function in KismetSystemLibrary: %s"), 
-							Function ? TEXT("YES") : TEXT("NO"));
-					}
-				}
-			}
 			
-			// If still not found and FunctionClass is "KismetSystemLibrary", try the full path
-			if (!Function && FunctionClass == TEXT("KismetSystemLibrary"))
-			{
-				UClass* SystemLibrary = FindObject<UClass>(nullptr, TEXT("/Script/Engine.KismetSystemLibrary"));
-				if (SystemLibrary)
-				{
-					Function = SystemLibrary->FindFunctionByName(FName(*FunctionName));
-					UE_LOG(LogTemp, Log, TEXT("CreateNodeFromData: Found function %s in UKismetSystemLibrary: %s"), 
-						*FunctionName, Function ? TEXT("YES") : TEXT("NO"));
-				}
-			}
-
 			if (Function)
 			{
 				CallFunctionNode->SetFromFunction(Function);
@@ -2197,6 +2170,71 @@ UEdGraphNode* FApplyEngine::CreateNodeFromData(
 
 		// Allocate default pins
 		NewNode->AllocateDefaultPins();
+
+		// Process captured pins data to set default values and properties
+		const TArray<TSharedPtr<FJsonValue>>* PinsArray = nullptr;
+		if (NodeData->TryGetArrayField(TEXT("Pins"), PinsArray) && PinsArray)
+		{
+			for (const TSharedPtr<FJsonValue>& PinValue : *PinsArray)
+			{
+				if (!PinValue.IsValid() || PinValue->Type != EJson::Object)
+				{
+					continue;
+				}
+
+				TSharedPtr<FJsonObject> PinObj = PinValue->AsObject();
+				FString PinName = PinObj->GetStringField(TEXT("PinName"));
+				
+				// Only read DefaultValue if the field exists
+				FString DefaultValue;
+				if (PinObj->HasField(TEXT("DefaultValue")))
+				{
+					DefaultValue = PinObj->GetStringField(TEXT("DefaultValue"));
+				}
+				else
+				{
+					UE_LOG(LogTemp, Log, TEXT("CreateNodeFromData: No DefaultValue found for pin '%s'"), *PinName);
+				}
+
+				// Only read DefaultObject if the field exists
+				FString DefaultObjectPath;
+				if (PinObj->HasField(TEXT("DefaultObject")))
+				{
+					DefaultObjectPath = PinObj->GetStringField(TEXT("DefaultObject"));
+				}
+
+				// Find the pin by name
+				UEdGraphPin* Pin = NewNode->FindPin(*PinName);
+				if (Pin)
+				{
+					// Set default value if available
+					if (!DefaultValue.IsEmpty())
+					{
+						Pin->DefaultValue = DefaultValue;
+						UE_LOG(LogTemp, VeryVerbose, TEXT("Set default value for pin '%s': '%s'"), *PinName, *DefaultValue);
+					}
+					
+					// Set default object if available
+					if (!DefaultObjectPath.IsEmpty())
+					{
+						UObject* DefaultObject = FindFirstObject<UObject>(*DefaultObjectPath);
+						if (DefaultObject)
+						{
+							Pin->DefaultObject = DefaultObject;
+							UE_LOG(LogTemp, VeryVerbose, TEXT("Set default object for pin '%s': '%s'"), *PinName, *DefaultObjectPath);
+						}
+						else
+						{
+							UE_LOG(LogTemp, Warning, TEXT("Could not find default object '%s' for pin '%s'"), *DefaultObjectPath, *PinName);
+						}
+					}
+				}
+				else
+				{
+					UE_LOG(LogTemp, Warning, TEXT("Could not find pin '%s' to set default value/object"), *PinName);
+				}
+			}
+		}
 
 		UE_LOG(LogTemp, VeryVerbose, TEXT("Created node: %s (%s)"), *NewNode->GetName(), *NodeClass);
 	}

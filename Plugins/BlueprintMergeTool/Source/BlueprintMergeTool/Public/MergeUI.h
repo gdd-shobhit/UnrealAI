@@ -63,6 +63,7 @@ private:
 	// File dialog helpers
 	bool ShowBlueprintSelectionDialog(FString& OutSelectedPath);
 	UBlueprint* LoadBlueprintFromPath(const FString& Path);
+	UBlueprint* ReloadBlueprintFromDisk(const FString& Path);
 	TSharedRef<SWidget> CreateBlueprintAssetList(FString& OutSelectedPath, bool& bAssetSelected);
 
 private:

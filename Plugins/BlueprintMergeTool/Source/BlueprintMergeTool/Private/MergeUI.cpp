@@ -19,6 +19,8 @@
 #include "IDesktopPlatform.h"
 #include "Editor.h"
 #include "Styling/CoreStyle.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Engine/Blueprint.h"
 
 void SMergeUI::Construct(const FArguments& InArgs)
 {
@@ -643,19 +645,57 @@ FReply SMergeUI::OnLoadRemoteBlueprint()
 
 FReply SMergeUI::OnPerformDiff()
 {
-	if (!BaseSnapshot.IsValid() || !LocalSnapshot.IsValid() || !RemoteSnapshot.IsValid())
+	if (!BaseBlueprint.IsValid() || !LocalBlueprint.IsValid() || !RemoteBlueprint.IsValid())
 	{
 		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(TEXT("Please load all three Blueprints first!")));
 		return FReply::Handled();
 	}
 
-	*StatusMessage = TEXT("Performing three-way diff...");
+	*StatusMessage = TEXT("Reloading Blueprints and performing three-way diff...");
 
-	// Perform the diff
+	// Reload Blueprints from disk to get latest changes
+	FString BasePath = BaseBlueprint->GetPathName();
+	FString LocalPath = LocalBlueprint->GetPathName();
+	FString RemotePath = RemoteBlueprint->GetPathName();
+
+	UE_LOG(LogTemp, Log, TEXT("Reloading Blueprints from disk:"));
+	UE_LOG(LogTemp, Log, TEXT("  Base: %s"), *BasePath);
+	UE_LOG(LogTemp, Log, TEXT("  Local: %s"), *LocalPath);
+	UE_LOG(LogTemp, Log, TEXT("  Remote: %s"), *RemotePath);
+
+	// Force reload from disk by clearing the object cache and reloading
+	UBlueprint* ReloadedBase = ReloadBlueprintFromDisk(BasePath);
+	UBlueprint* ReloadedLocal = ReloadBlueprintFromDisk(LocalPath);
+	UBlueprint* ReloadedRemote = ReloadBlueprintFromDisk(RemotePath);
+
+	if (!ReloadedBase || !ReloadedLocal || !ReloadedRemote)
+	{
+		*StatusMessage = TEXT("Failed to reload Blueprints from disk");
+		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(TEXT("Failed to reload Blueprints from disk. Check the log for details.")));
+		return FReply::Handled();
+	}
+
+	// Update our Blueprint references
+	BaseBlueprint = ReloadedBase;
+	LocalBlueprint = ReloadedLocal;
+	RemoteBlueprint = ReloadedRemote;
+
+	// Create fresh snapshots from the reloaded Blueprints
+	UE_LOG(LogTemp, Log, TEXT("Creating fresh snapshots from reloaded Blueprints"));
+	if (!FSnapshotManager::CreateSnapshot(ReloadedBase, BaseSnapshot) ||
+		!FSnapshotManager::CreateSnapshot(ReloadedLocal, LocalSnapshot) ||
+		!FSnapshotManager::CreateSnapshot(ReloadedRemote, RemoteSnapshot))
+	{
+		*StatusMessage = TEXT("Failed to create snapshots from reloaded Blueprints");
+		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(TEXT("Failed to create snapshots from reloaded Blueprints. Check the log for details.")));
+		return FReply::Handled();
+	}
+
+	// Perform the diff with fresh snapshots
 	if (FDiffEngine::PerformThreeWayDiff(BaseSnapshot, LocalSnapshot, RemoteSnapshot, CurrentDiffResult))
 	{
 		bDiffPerformed = true;
-		*StatusMessage = FString::Printf(TEXT("Diff completed: %d operations, %d conflicts"), 
+		*StatusMessage = FString::Printf(TEXT("Diff completed with fresh data: %d operations, %d conflicts"), 
 			CurrentDiffResult.Operations.Num(), CurrentDiffResult.Conflicts.Num());
 
 		UpdatePreview();
@@ -1189,6 +1229,40 @@ UBlueprint* SMergeUI::LoadBlueprintFromPath(const FString& Path)
 	}
 	
 	UE_LOG(LogTemp, Warning, TEXT("Failed to load Blueprint from path: %s"), *Path);
+	return nullptr;
+}
+
+UBlueprint* SMergeUI::ReloadBlueprintFromDisk(const FString& Path)
+{
+	UE_LOG(LogTemp, Log, TEXT("Reloading Blueprint from disk: %s"), *Path);
+	
+	// First, try to find the existing object and mark it for garbage collection
+	UBlueprint* ExistingBlueprint = FindObject<UBlueprint>(nullptr, *Path);
+	if (ExistingBlueprint)
+	{
+		UE_LOG(LogTemp, Log, TEXT("Found existing Blueprint object, forcing reload from disk"));
+		
+		// Mark the existing object for garbage collection
+		ExistingBlueprint->MarkAsGarbage();
+		
+		// Force garbage collection to clear the object from memory
+		CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+	}
+	
+	// Now reload from disk
+	UBlueprint* ReloadedBlueprint = LoadObject<UBlueprint>(nullptr, *Path);
+	
+	if (ReloadedBlueprint)
+	{
+		UE_LOG(LogTemp, Log, TEXT("Successfully reloaded Blueprint from disk: %s"), *ReloadedBlueprint->GetName());
+		
+		// Compile the Blueprint to ensure it's in a valid state
+		FKismetEditorUtilities::CompileBlueprint(ReloadedBlueprint, EBlueprintCompileOptions::None);
+		
+		return ReloadedBlueprint;
+	}
+	
+	UE_LOG(LogTemp, Error, TEXT("Failed to reload Blueprint from disk: %s"), *Path);
 	return nullptr;
 }
 

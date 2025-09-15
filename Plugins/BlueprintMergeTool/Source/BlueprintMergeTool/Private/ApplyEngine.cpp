@@ -1957,16 +1957,31 @@ UEdGraphNode* FApplyEngine::CreateNodeFromData(
 		// Set function reference if provided
 		FString FunctionName = NodeData->GetStringField(TEXT("FunctionName"));
 		FString FunctionClass = NodeData->GetStringField(TEXT("FunctionClass"));
+		FString FunctionClassPath = NodeData->GetStringField(TEXT("FunctionClassPath"));
+		FString FunctionModuleName = NodeData->GetStringField(TEXT("FunctionModuleName"));
 		
-		UE_LOG(LogTemp, Log, TEXT("CreateNodeFromData: Creating CallFunction node - FunctionName: %s, FunctionClass: %s"), 
-			*FunctionName, *FunctionClass);
+		UE_LOG(LogTemp, Log, TEXT("CreateNodeFromData: Creating CallFunction node - FunctionName: %s, FunctionClass: %s, Path: %s"), 
+			*FunctionName, *FunctionClass, *FunctionClassPath);
 		
 		if (!FunctionName.IsEmpty())
 		{
 			// Try to find the function
 			UFunction* Function = nullptr;
 			
-			if (!FunctionClass.IsEmpty())
+			// First try using the full class path if available
+			if (!FunctionClassPath.IsEmpty())
+			{
+				UClass* OwnerClass = FindFirstObject<UClass>(*FunctionClassPath);
+				if (OwnerClass)
+				{
+					Function = OwnerClass->FindFunctionByName(FName(*FunctionName));
+					UE_LOG(LogTemp, Log, TEXT("CreateNodeFromData: Found function using full path %s: %s"), 
+						*FunctionClassPath, Function ? TEXT("YES") : TEXT("NO"));
+				}
+			}
+			
+			// If not found with full path, try with class name
+			if (!Function && !FunctionClass.IsEmpty())
 			{
 				UClass* OwnerClass = FindObject<UClass>(nullptr, *FunctionClass);
 				if (OwnerClass)
@@ -2528,3 +2543,4 @@ bool FApplyEngine::ValidateCustomClassAvailability(
 	
 	return bAllClassesAvailable;
 }
+

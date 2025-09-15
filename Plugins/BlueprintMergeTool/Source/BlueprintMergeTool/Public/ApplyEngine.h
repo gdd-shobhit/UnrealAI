@@ -470,12 +470,5 @@ public:
 	 */
 	static void RefreshBlueprintEditor(UBlueprint* Blueprint);
 
-	/**
-	 * Find a function across all available libraries and classes
-	 * @param FunctionName Name of the function to find
-	 * @param PreferredClass Preferred class to search first (can be empty)
-	 * @return Found function or nullptr
-	 */
-	static UFunction* FindFunctionInAllLibraries(const FString& FunctionName, const FString& PreferredClass);
 
 };

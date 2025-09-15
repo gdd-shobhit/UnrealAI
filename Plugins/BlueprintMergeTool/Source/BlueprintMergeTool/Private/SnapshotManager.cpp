@@ -350,7 +350,17 @@ void FSnapshotManager::CaptureNode(UEdGraphNode* Node, TSharedPtr<FJsonObject>& 
 			OutNodeObject->SetStringField(TEXT("FunctionName"), CallFunctionNode->FunctionReference.GetMemberName().ToString());
 			if (CallFunctionNode->FunctionReference.GetMemberParentClass())
 			{
-				OutNodeObject->SetStringField(TEXT("FunctionClass"), CallFunctionNode->FunctionReference.GetMemberParentClass()->GetName());
+				UClass* ParentClass = CallFunctionNode->FunctionReference.GetMemberParentClass();
+				
+				// Capture both short name and full path
+				OutNodeObject->SetStringField(TEXT("FunctionClass"), ParentClass->GetName());
+				OutNodeObject->SetStringField(TEXT("FunctionClassPath"), ParentClass->GetPathName());
+				OutNodeObject->SetStringField(TEXT("FunctionModuleName"), ParentClass->GetPackage()->GetName());
+				
+				UE_LOG(LogTemp, VeryVerbose, TEXT("SnapshotManager: Captured function - Name: %s, Class: %s, Path: %s"), 
+					*CallFunctionNode->FunctionReference.GetMemberName().ToString(), 
+					*ParentClass->GetName(), 
+					*ParentClass->GetPathName());
 			}
 		}
 	}

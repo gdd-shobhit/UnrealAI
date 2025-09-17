@@ -50,6 +50,9 @@ struct BLUEPRINTMERGETOOL_API FMergePlannerConfig
 	UPROPERTY()
 	TMap<FString, EResolutionStrategy> PerTypeStrategies;
 
+	UPROPERTY()
+	bool bKeepBothConflictingNodes;
+
 	FMergePlannerConfig()
 		: DefaultStrategy(EResolutionStrategy::NonDestructive)
 		, bPreferLocalForVariables(true)
@@ -57,6 +60,7 @@ struct BLUEPRINTMERGETOOL_API FMergePlannerConfig
 		, bAutoResolvePositionConflicts(true)
 		, bEnableLLMResolution(true)
 		, ConflictThresholdForManualReview(0.7f)
+		, bKeepBothConflictingNodes(false)
 	{
 	}
 };
@@ -204,6 +208,7 @@ private:
 	 */
 	static bool ApplyNonDestructiveResolution(
 		const FMergeConflict& Conflict,
+		const FMergePlannerConfig& Config,
 		TArray<FMergeOperation>& OutOperations
 	);
 
@@ -217,6 +222,7 @@ private:
 	static bool ApplyStrategyResolution(
 		const FMergeConflict& Conflict,
 		EResolutionStrategy Strategy,
+		const FMergePlannerConfig& Config,
 		TArray<FMergeOperation>& OutOperations
 	);
 

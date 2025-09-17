@@ -133,6 +133,13 @@ struct BLUEPRINTMERGETOOL_API FMergeConflict
 	UPROPERTY()
 	FString ResolutionStrategy; // "UseLocal", "UseRemote", "Manual", etc.
 
+	// Additional data for "Keep Both" strategy
+	UPROPERTY()
+	FString LocalData; // JSON data for local version (for nodes/graphs)
+	
+	UPROPERTY()
+	FString RemoteData; // JSON data for remote version (for nodes/graphs)
+
 	FMergeConflict()
 		: Severity(EConflictSeverity::Medium)
 	{
@@ -370,6 +377,29 @@ public:
 		const FString& LocalValue,
 		const FString& RemoteValue,
 		const TArray<FString>& DifferingFields
+	);
+
+	/**
+	 * Create a merge conflict with actual data for "Keep Both" strategy
+	 * @param ConflictType Type of conflict
+	 * @param ElementName Name of the conflicting element
+	 * @param BaseValue Base version value
+	 * @param LocalValue Local version value
+	 * @param RemoteValue Remote version value
+	 * @param DifferingFields Fields that differ
+	 * @param LocalData JSON data for local version
+	 * @param RemoteData JSON data for remote version
+	 * @return Constructed merge conflict with data
+	 */
+	static FMergeConflict CreateConflict(
+		const FString& ConflictType,
+		const FString& ElementName,
+		const FString& BaseValue,
+		const FString& LocalValue,
+		const FString& RemoteValue,
+		const TArray<FString>& DifferingFields,
+		const FString& LocalData,
+		const FString& RemoteData
 	);
 
 	/**

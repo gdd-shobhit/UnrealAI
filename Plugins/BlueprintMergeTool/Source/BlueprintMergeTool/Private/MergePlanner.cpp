@@ -106,6 +106,9 @@ void FMergePlanner::ApplyAutomaticResolution(
 {
 	for (const FMergeConflict& Conflict : Conflicts)
 	{
+		UE_LOG(LogTemp, Log, TEXT("MergePlanner: Processing conflict - Type: %s, Element: %s, Strategy: %d"), 
+			*Conflict.ConflictType, *Conflict.ElementName, (int32)Config.DefaultStrategy);
+		
 		if (CanAutoResolve(Conflict, Config))
 		{
 			TArray<FMergeOperation> ResolutionOps;
@@ -114,25 +117,58 @@ void FMergePlanner::ApplyAutomaticResolution(
 			// Try specific resolution strategies based on conflict type
 			if (Conflict.ConflictType == TEXT("NodeMove") && Config.bAutoResolvePositionConflicts)
 			{
+				UE_LOG(LogTemp, Log, TEXT("MergePlanner: Using ResolvePositionConflict for NodeMove"));
 				bResolved = ResolvePositionConflict(Conflict, ResolutionOps);
 			}
 			else if (Conflict.ConflictType == TEXT("Variable"))
 			{
+				UE_LOG(LogTemp, Log, TEXT("MergePlanner: Using ResolveVariableConflict for Variable"));
 				bResolved = ResolveVariableConflict(Conflict, Config, ResolutionOps);
 			}
-			else if (Conflict.ConflictType == TEXT("Node"))
+			else if (Conflict.ConflictType == TEXT("Node") || Conflict.ConflictType == TEXT("Graph") || Conflict.ConflictType == TEXT("Function"))
 			{
-				bResolved = ResolveNodeConflict(Conflict, Config, ResolutionOps);
+				// For Node/Graph/Function conflicts, use strategy-based resolution if NonDestructive is enabled
+				// This allows the "Keep Both" logic to work properly
+				if (Config.DefaultStrategy == EResolutionStrategy::NonDestructive)
+				{
+					UE_LOG(LogTemp, Log, TEXT("MergePlanner: Using strategy-based resolution for %s (NonDestructive)"), *Conflict.ConflictType);
+					EResolutionStrategy Strategy = Config.PerTypeStrategies.FindRef(Conflict.ConflictType);
+					if (Strategy == EResolutionStrategy::UseLocal) // Default value check
+					{
+						Strategy = Config.DefaultStrategy;
+					}
+					bResolved = ApplyStrategyResolution(Conflict, Strategy, Config, ResolutionOps);
+				}
+				else
+				{
+					UE_LOG(LogTemp, Log, TEXT("MergePlanner: Using specific resolution for %s (other strategy)"), *Conflict.ConflictType);
+					// Use the specific conflict resolution for other strategies
+					if (Conflict.ConflictType == TEXT("Node"))
+					{
+						bResolved = ResolveNodeConflict(Conflict, Config, ResolutionOps);
+					}
+					else
+					{
+						// For Graph/Function conflicts, use strategy-based resolution as fallback
+						EResolutionStrategy Strategy = Config.PerTypeStrategies.FindRef(Conflict.ConflictType);
+						if (Strategy == EResolutionStrategy::UseLocal) // Default value check
+						{
+							Strategy = Config.DefaultStrategy;
+						}
+						bResolved = ApplyStrategyResolution(Conflict, Strategy, Config, ResolutionOps);
+					}
+				}
 			}
 			else
 			{
+				UE_LOG(LogTemp, Log, TEXT("MergePlanner: Using strategy-based resolution for %s"), *Conflict.ConflictType);
 				// Try strategy-based resolution
 				EResolutionStrategy Strategy = Config.PerTypeStrategies.FindRef(Conflict.ConflictType);
 				if (Strategy == EResolutionStrategy::UseLocal) // Default value check
 				{
 					Strategy = Config.DefaultStrategy;
 				}
-				bResolved = ApplyStrategyResolution(Conflict, Strategy, ResolutionOps);
+				bResolved = ApplyStrategyResolution(Conflict, Strategy, Config, ResolutionOps);
 			}
 
 			if (bResolved)
@@ -261,9 +297,11 @@ bool FMergePlanner::ValidateMergePlan(
 
 bool FMergePlanner::ApplyNonDestructiveResolution(
 	const FMergeConflict& Conflict,
+	const FMergePlannerConfig& Config,
 	TArray<FMergeOperation>& OutOperations)
 {
 	// Non-destructive strategy: prefer additions over removals, combine when possible
+	// When bKeepBothConflictingNodes is enabled, keep both versions of conflicting nodes
 	
 	if (Conflict.ConflictType == TEXT("Variable"))
 	{
@@ -294,22 +332,112 @@ bool FMergePlanner::ApplyNonDestructiveResolution(
 			return true;
 		}
 	}
-	else if (Conflict.ConflictType == TEXT("Node"))
+	else if (Conflict.ConflictType == TEXT("Node") || Conflict.ConflictType == TEXT("Graph") || Conflict.ConflictType == TEXT("Function"))
 	{
-		// For nodes, prefer keeping both if possible (rename if needed)
+		// For nodes/graphs/functions, implement "keep both" strategy - merge conflicting elements but leave them unconnected
+		EMergeOperationType OpType = EMergeOperationType::AddNode;
+		if (Conflict.ConflictType == TEXT("Graph") || Conflict.ConflictType == TEXT("Function"))
+		{
+			OpType = EMergeOperationType::AddGraph;
+		}
+		
 		if (Conflict.LocalValue.Contains(TEXT("(not present)")))
 		{
-			FMergeOperation Op = FDiffEngine::CreateOperation(EMergeOperationType::AddNode, Conflict.ConflictId, Conflict.ConflictId);
+			// Local doesn't have it, add remote element
+			FMergeOperation Op = FDiffEngine::CreateOperation(OpType, Conflict.ConflictId, Conflict.ConflictId);
 			Op.AdditionalData.Add(TEXT("Source"), TEXT("Remote"));
+			Op.AdditionalData.Add(TEXT("KeepBoth"), TEXT("true"));
 			OutOperations.Add(Op);
 			return true;
 		}
 		else if (Conflict.RemoteValue.Contains(TEXT("(not present)")))
 		{
-			FMergeOperation Op = FDiffEngine::CreateOperation(EMergeOperationType::AddNode, Conflict.ConflictId, Conflict.ConflictId);
+			// Remote doesn't have it, add local element
+			FMergeOperation Op = FDiffEngine::CreateOperation(OpType, Conflict.ConflictId, Conflict.ConflictId);
 			Op.AdditionalData.Add(TEXT("Source"), TEXT("Local"));
+			Op.AdditionalData.Add(TEXT("KeepBoth"), TEXT("true"));
 			OutOperations.Add(Op);
 			return true;
+		}
+		else
+		{
+			// Both have the element but with different properties
+			if (Config.bKeepBothConflictingNodes)
+			{
+				// For "Keep Both" strategy, we need to actually add the conflicting element to the graph
+				// The issue is that we don't have the actual node/graph data in the conflict
+				// So we'll create a special operation that the ApplyEngine can handle
+				
+				if (Conflict.ConflictType == TEXT("Graph") || Conflict.ConflictType == TEXT("Function"))
+				{
+					// For Graph/Function conflicts, we need to add the remote version of the graph
+					// Generate a new GUID for the remote version to avoid conflicts
+					FString RemoteGraphId = FGuid::NewGuid().ToString();
+					
+					// Create an AddGraph operation for the remote version
+					FMergeOperation RemoteGraphOp = FDiffEngine::CreateOperation(EMergeOperationType::AddGraph, RemoteGraphId, RemoteGraphId);
+					RemoteGraphOp.AdditionalData.Add(TEXT("Source"), TEXT("Remote"));
+					RemoteGraphOp.AdditionalData.Add(TEXT("KeepBoth"), TEXT("true"));
+					RemoteGraphOp.AdditionalData.Add(TEXT("ConflictResolution"), TEXT("KeepBoth"));
+					RemoteGraphOp.AdditionalData.Add(TEXT("OriginalConflictId"), Conflict.ConflictId);
+					RemoteGraphOp.AdditionalData.Add(TEXT("ConflictType"), Conflict.ConflictType);
+					RemoteGraphOp.AdditionalData.Add(TEXT("ElementName"), Conflict.ElementName);
+					RemoteGraphOp.AdditionalData.Add(TEXT("RemoteValue"), Conflict.RemoteValue);
+					
+					// Use the actual graph data from the conflict
+					if (!Conflict.RemoteData.IsEmpty())
+					{
+						RemoteGraphOp.AdditionalData.Add(TEXT("GraphData"), Conflict.RemoteData);
+						UE_LOG(LogTemp, Log, TEXT("NonDestructive: Adding remote version of conflicting %s '%s' with actual graph data (GUID: %s)"), *Conflict.ConflictType, *Conflict.ElementName, *RemoteGraphId);
+					}
+					else
+					{
+						UE_LOG(LogTemp, Warning, TEXT("NonDestructive: No RemoteData available for conflicting %s '%s'"), *Conflict.ConflictType, *Conflict.ElementName);
+					}
+					
+					OutOperations.Add(RemoteGraphOp);
+					return true;
+				}
+				else
+				{
+					// For Node conflicts, create an AddNode operation
+					FString RemoteNodeId = FGuid::NewGuid().ToString();
+					
+					FMergeOperation RemoteNodeOp = FDiffEngine::CreateOperation(EMergeOperationType::AddNode, RemoteNodeId, RemoteNodeId);
+					RemoteNodeOp.AdditionalData.Add(TEXT("Source"), TEXT("Remote"));
+					RemoteNodeOp.AdditionalData.Add(TEXT("KeepBoth"), TEXT("true"));
+					RemoteNodeOp.AdditionalData.Add(TEXT("ConflictResolution"), TEXT("KeepBoth"));
+					RemoteNodeOp.AdditionalData.Add(TEXT("OriginalConflictId"), Conflict.ConflictId);
+					RemoteNodeOp.AdditionalData.Add(TEXT("ConflictType"), Conflict.ConflictType);
+					RemoteNodeOp.AdditionalData.Add(TEXT("ElementName"), Conflict.ElementName);
+					RemoteNodeOp.AdditionalData.Add(TEXT("RemoteValue"), Conflict.RemoteValue);
+					
+					// Use the actual node data from the conflict
+					if (!Conflict.RemoteData.IsEmpty())
+					{
+						RemoteNodeOp.AdditionalData.Add(TEXT("NodeData"), Conflict.RemoteData);
+						UE_LOG(LogTemp, Log, TEXT("NonDestructive: Adding remote version of conflicting %s '%s' with actual node data (GUID: %s)"), *Conflict.ConflictType, *Conflict.ElementName, *RemoteNodeId);
+					}
+					else
+					{
+						UE_LOG(LogTemp, Warning, TEXT("NonDestructive: No RemoteData available for conflicting %s '%s'"), *Conflict.ConflictType, *Conflict.ElementName);
+					}
+					
+					OutOperations.Add(RemoteNodeOp);
+					
+					UE_LOG(LogTemp, Log, TEXT("NonDestructive: Adding remote version of conflicting %s '%s' with new GUID %s"), *Conflict.ConflictType, *Conflict.ElementName, *RemoteNodeId);
+					return true;
+				}
+			}
+			else
+			{
+				// Traditional non-destructive: prefer local by default
+				FMergeOperation Op = FDiffEngine::CreateOperation(OpType, Conflict.ConflictId, Conflict.ConflictId);
+				Op.AdditionalData.Add(TEXT("Source"), TEXT("Local"));
+				Op.AdditionalData.Add(TEXT("Reason"), TEXT("NonDestructiveDefault"));
+				OutOperations.Add(Op);
+				return true;
+			}
 		}
 	}
 	else if (Conflict.ConflictType == TEXT("NodeMove"))
@@ -324,6 +452,7 @@ bool FMergePlanner::ApplyNonDestructiveResolution(
 bool FMergePlanner::ApplyStrategyResolution(
 	const FMergeConflict& Conflict,
 	EResolutionStrategy Strategy,
+	const FMergePlannerConfig& Config,
 	TArray<FMergeOperation>& OutOperations)
 {
 	switch (Strategy)
@@ -378,7 +507,7 @@ bool FMergePlanner::ApplyStrategyResolution(
 		}
 
 	case EResolutionStrategy::NonDestructive:
-		return ApplyNonDestructiveResolution(Conflict, OutOperations);
+		return ApplyNonDestructiveResolution(Conflict, Config, OutOperations);
 
 	case EResolutionStrategy::SmartMerge:
 		// Try to intelligently combine changes

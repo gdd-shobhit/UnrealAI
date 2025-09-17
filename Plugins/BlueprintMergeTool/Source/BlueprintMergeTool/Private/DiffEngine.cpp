@@ -567,13 +567,22 @@ void FDiffEngine::DiffGraphs(
 				UE_LOG(LogTemp, Warning, TEXT("DiffEngine: Graph '%s' added in both but differs in: %s"), 
 					*GraphName, *FString::Join(DifferingFields, TEXT(", ")));
 				
+				// Serialize the actual graph data for "Keep Both" strategy
+				FString LocalGraphData, RemoteGraphData;
+				TSharedRef<TJsonWriter<>> LocalWriter = TJsonWriterFactory<>::Create(&LocalGraphData);
+				TSharedRef<TJsonWriter<>> RemoteWriter = TJsonWriterFactory<>::Create(&RemoteGraphData);
+				FJsonSerializer::Serialize(LocalGraph.ToSharedRef(), LocalWriter);
+				FJsonSerializer::Serialize(RemoteGraph.ToSharedRef(), RemoteWriter);
+				
 				FMergeConflict Conflict = CreateConflict(
 					TEXT("Graph"),
 					GraphName,
 					TEXT("(not present)"),
 					TEXT("Added locally"),
 					TEXT("Added remotely"),
-					DifferingFields
+					DifferingFields,
+					LocalGraphData,
+					RemoteGraphData
 				);
 				OutConflicts.Add(Conflict);
 			}
@@ -730,13 +739,22 @@ void FDiffEngine::DiffNodes(
 					UE_LOG(LogTemp, Warning, TEXT("DiffEngine: Node '%s' added in both but differs in: %s"), 
 						*NodeName, *FString::Join(DifferingFields, TEXT(", ")));
 				
+					// Serialize the actual node data for "Keep Both" strategy
+					FString LocalNodeData, RemoteNodeData;
+					TSharedRef<TJsonWriter<>> LocalWriter = TJsonWriterFactory<>::Create(&LocalNodeData);
+					TSharedRef<TJsonWriter<>> RemoteWriter = TJsonWriterFactory<>::Create(&RemoteNodeData);
+					FJsonSerializer::Serialize(LocalNode.ToSharedRef(), LocalWriter);
+					FJsonSerializer::Serialize(RemoteNode.ToSharedRef(), RemoteWriter);
+				
 					FMergeConflict Conflict = CreateConflict(
 						TEXT("Node"),
 						NodeName,
 						TEXT("(not present)"),
 						LocalNode->GetStringField(TEXT("NodeTitle")),
 						RemoteNode->GetStringField(TEXT("NodeTitle")),
-						DifferingFields
+						DifferingFields,
+						LocalNodeData, // Pass actual data
+						RemoteNodeData // Pass actual data
 					);
 					Conflict.Severity = AnalyzeConflictSeverity(TEXT("Node"), DifferingFields);
 					OutConflicts.Add(Conflict);
@@ -1124,6 +1142,29 @@ FMergeConflict FDiffEngine::CreateConflict(
 	Conflict.LocalValue = LocalValue;
 	Conflict.RemoteValue = RemoteValue;
 	Conflict.DifferingFields = DifferingFields;
+	return Conflict;
+}
+
+FMergeConflict FDiffEngine::CreateConflict(
+	const FString& ConflictType,
+	const FString& ElementName,
+	const FString& BaseValue,
+	const FString& LocalValue,
+	const FString& RemoteValue,
+	const TArray<FString>& DifferingFields,
+	const FString& LocalData,
+	const FString& RemoteData)
+{
+	FMergeConflict Conflict;
+	Conflict.ConflictId = FGuid::NewGuid().ToString();
+	Conflict.ConflictType = ConflictType;
+	Conflict.ElementName = ElementName;
+	Conflict.BaseValue = BaseValue;
+	Conflict.LocalValue = LocalValue;
+	Conflict.RemoteValue = RemoteValue;
+	Conflict.DifferingFields = DifferingFields;
+	Conflict.LocalData = LocalData;
+	Conflict.RemoteData = RemoteData;
 	return Conflict;
 }
 

@@ -357,6 +357,28 @@ void FSnapshotManager::CaptureNode(UEdGraphNode* Node, TSharedPtr<FJsonObject>& 
 				OutNodeObject->SetStringField(TEXT("FunctionClassPath"), ParentClass->GetPathName());
 				OutNodeObject->SetStringField(TEXT("FunctionModuleName"), ParentClass->GetPackage()->GetName());
 				
+				// Capture function metadata (like CallInEditor for development-only functions)
+				UFunction* Function = CallFunctionNode->FunctionReference.ResolveMember<UFunction>(ParentClass);
+				if (Function)
+				{
+					// Check for CallInEditor metadata (development-only functions)
+					if (Function->HasMetaData(TEXT("CallInEditor")))
+					{
+						OutNodeObject->SetBoolField(TEXT("bCallInEditor"), true);
+						UE_LOG(LogTemp, VeryVerbose, TEXT("SnapshotManager: Captured CallInEditor flag for function %s"), 
+							*CallFunctionNode->FunctionReference.GetMemberName().ToString());
+					}
+					
+					// Capture function flags that might affect behavior
+					OutNodeObject->SetNumberField(TEXT("FunctionFlags"), (double)Function->FunctionFlags);
+					
+					UE_LOG(LogTemp, VeryVerbose, TEXT("SnapshotManager: Captured function - Name: %s, Class: %s, Path: %s, Flags: 0x%X"), 
+						*CallFunctionNode->FunctionReference.GetMemberName().ToString(), 
+						*ParentClass->GetName(), 
+						*ParentClass->GetPathName(),
+						Function->FunctionFlags);
+				}
+				
 				UE_LOG(LogTemp, VeryVerbose, TEXT("SnapshotManager: Captured function - Name: %s, Class: %s, Path: %s"), 
 					*CallFunctionNode->FunctionReference.GetMemberName().ToString(), 
 					*ParentClass->GetName(), 

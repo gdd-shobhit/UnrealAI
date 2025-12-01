@@ -531,9 +531,27 @@ void FDiffEngine::DiffGraphs(
 	TArray<FMergeOperation>& OutOperations,
 	TArray<FMergeConflict>& OutConflicts)
 {
+	// Graph types to diff - currently supporting:
+	// - EventGraph: Main execution graph for event-driven logic
+	// - ConstructionScript: Executed when Blueprint instance is created
+	// - Function: Reusable function graphs
+	// 
+	// Other graph types that exist but are NOT currently diffed:
+	// - Macro: Macro graphs (reusable node collections) - could be added if needed
+	// - Unknown: Unclassified graphs (may include Interface graphs, Delegate graphs, etc.)
+	// 
+	// To add more graph types, update this set and ensure SnapshotManager classifies them correctly
+	static const TSet<FString> DiffableGraphTypes = {
+		TEXT("EventGraph"),
+		TEXT("ConstructionScript"),
+		TEXT("Function")
+		// Potential additions:
+		// TEXT("Macro"),  // Macro graphs - currently classified as "Unknown"
+	};
+
 	// Build lookup maps by a stable graph key (FunctionName if present, else GraphName)
 	TMap<FString, TSharedPtr<FJsonObject>> BaseGraphMap, LocalGraphMap, RemoteGraphMap;
-	auto BuildGraphMap = [](const TArray<TSharedPtr<FJsonValue>>& Graphs, TMap<FString, TSharedPtr<FJsonObject>>& OutMap)
+	auto BuildGraphMap = [&DiffableGraphTypes](const TArray<TSharedPtr<FJsonValue>>& Graphs, TMap<FString, TSharedPtr<FJsonObject>>& OutMap)
 	{
 		for (const TSharedPtr<FJsonValue>& GraphValue : Graphs)
 		{
@@ -542,8 +560,16 @@ void FDiffEngine::DiffGraphs(
 				continue;
 			}
 			TSharedPtr<FJsonObject> GraphObj = GraphValue->AsObject();
-			FString Key;
 			FString GraphType = GraphObj->GetStringField(TEXT("GraphType"));
+			
+			// Skip graphs that are not in the diffable types list
+			if (!DiffableGraphTypes.Contains(GraphType))
+			{
+				UE_LOG(LogTemp, Verbose, TEXT("DiffEngine: Skipping graph type '%s' (not in diffable types)"), *GraphType);
+				continue;
+			}
+			
+			FString Key;
 			if (GraphType == TEXT("Function"))
 			{
 				const TSharedPtr<FJsonValue>* FnField = GraphObj->Values.Find(TEXT("FunctionName"));

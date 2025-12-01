@@ -915,6 +915,9 @@ void FDiffEngine::DiffConnections(
 {
 	// Build sets for efficient comparison
 	TSet<FString> BaseConnectionSet, LocalConnectionSet, RemoteConnectionSet;
+	
+	// Also build maps from connection ID to connection object for later lookup
+	TMap<FString, TSharedPtr<FJsonObject>> BaseConnectionMap, LocalConnectionMap, RemoteConnectionMap;
 
 	// Create connection identifiers
 	for (const TSharedPtr<FJsonValue>& ConnValue : BaseConnections)
@@ -927,6 +930,7 @@ void FDiffEngine::DiffConnections(
 				*ConnObj->GetStringField(TEXT("TargetNodeGuid")),
 				*ConnObj->GetStringField(TEXT("TargetPinName")));
 			BaseConnectionSet.Add(ConnId);
+			BaseConnectionMap.Add(ConnId, ConnObj);
 		}
 	}
 
@@ -940,6 +944,7 @@ void FDiffEngine::DiffConnections(
 				*ConnObj->GetStringField(TEXT("TargetNodeGuid")),
 				*ConnObj->GetStringField(TEXT("TargetPinName")));
 			LocalConnectionSet.Add(ConnId);
+			LocalConnectionMap.Add(ConnId, ConnObj);
 		}
 	}
 
@@ -953,6 +958,7 @@ void FDiffEngine::DiffConnections(
 				*ConnObj->GetStringField(TEXT("TargetNodeGuid")),
 				*ConnObj->GetStringField(TEXT("TargetPinName")));
 			RemoteConnectionSet.Add(ConnId);
+			RemoteConnectionMap.Add(ConnId, ConnObj);
 		}
 	}
 
@@ -971,18 +977,105 @@ void FDiffEngine::DiffConnections(
 		{
 			// Connection added locally only
 			FMergeOperation Op = CreateOperation(EMergeOperationType::LinkPins, GraphName, ConnId);
+			
+			// Store connection details for semantic fallback matching
+			TSharedPtr<FJsonObject> ConnObj = LocalConnectionMap.FindRef(ConnId);
+			if (ConnObj.IsValid())
+			{
+				Op.AdditionalData.Add(TEXT("SourceNodeGuid"), ConnObj->GetStringField(TEXT("SourceNodeGuid")));
+				Op.AdditionalData.Add(TEXT("SourcePinName"), ConnObj->GetStringField(TEXT("SourcePinName")));
+				Op.AdditionalData.Add(TEXT("TargetNodeGuid"), ConnObj->GetStringField(TEXT("TargetNodeGuid")));
+				Op.AdditionalData.Add(TEXT("TargetPinName"), ConnObj->GetStringField(TEXT("TargetPinName")));
+				
+				if (ConnObj->HasField(TEXT("SourceNodeTitle")))
+				{
+					Op.AdditionalData.Add(TEXT("SourceNodeTitle"), ConnObj->GetStringField(TEXT("SourceNodeTitle")));
+				}
+				if (ConnObj->HasField(TEXT("TargetNodeTitle")))
+				{
+					Op.AdditionalData.Add(TEXT("TargetNodeTitle"), ConnObj->GetStringField(TEXT("TargetNodeTitle")));
+				}
+				if (ConnObj->HasField(TEXT("SourceFunctionName")))
+				{
+					Op.AdditionalData.Add(TEXT("SourceFunctionName"), ConnObj->GetStringField(TEXT("SourceFunctionName")));
+				}
+				if (ConnObj->HasField(TEXT("TargetFunctionName")))
+				{
+					Op.AdditionalData.Add(TEXT("TargetFunctionName"), ConnObj->GetStringField(TEXT("TargetFunctionName")));
+				}
+			}
+			
 			OutOperations.Add(Op);
 		}
 		else if (!bInBase && !bInLocal && bInRemote)
 		{
 			// Connection added remotely only
 			FMergeOperation Op = CreateOperation(EMergeOperationType::LinkPins, GraphName, ConnId);
+			
+			// Store connection details for semantic fallback matching when GUIDs don't match
+			TSharedPtr<FJsonObject> ConnObj = RemoteConnectionMap.FindRef(ConnId);
+			if (ConnObj.IsValid())
+			{
+				// Store the connection data for semantic matching
+				Op.AdditionalData.Add(TEXT("SourceNodeGuid"), ConnObj->GetStringField(TEXT("SourceNodeGuid")));
+				Op.AdditionalData.Add(TEXT("SourcePinName"), ConnObj->GetStringField(TEXT("SourcePinName")));
+				Op.AdditionalData.Add(TEXT("TargetNodeGuid"), ConnObj->GetStringField(TEXT("TargetNodeGuid")));
+				Op.AdditionalData.Add(TEXT("TargetPinName"), ConnObj->GetStringField(TEXT("TargetPinName")));
+				
+				// Store node titles if available (for semantic fallback when GUIDs don't match)
+				if (ConnObj->HasField(TEXT("SourceNodeTitle")))
+				{
+					Op.AdditionalData.Add(TEXT("SourceNodeTitle"), ConnObj->GetStringField(TEXT("SourceNodeTitle")));
+				}
+				if (ConnObj->HasField(TEXT("TargetNodeTitle")))
+				{
+					Op.AdditionalData.Add(TEXT("TargetNodeTitle"), ConnObj->GetStringField(TEXT("TargetNodeTitle")));
+				}
+				// Also store function names for more reliable semantic matching
+				if (ConnObj->HasField(TEXT("SourceFunctionName")))
+				{
+					Op.AdditionalData.Add(TEXT("SourceFunctionName"), ConnObj->GetStringField(TEXT("SourceFunctionName")));
+				}
+				if (ConnObj->HasField(TEXT("TargetFunctionName")))
+				{
+					Op.AdditionalData.Add(TEXT("TargetFunctionName"), ConnObj->GetStringField(TEXT("TargetFunctionName")));
+				}
+			}
+			
 			OutOperations.Add(Op);
 		}
 		else if (!bInBase && bInLocal && bInRemote)
 		{
 			// Connection added in both - no conflict, just add once
 			FMergeOperation Op = CreateOperation(EMergeOperationType::LinkPins, GraphName, ConnId);
+			
+			// Store connection details from remote (prefer remote for consistency)
+			TSharedPtr<FJsonObject> ConnObj = RemoteConnectionMap.FindRef(ConnId);
+			if (ConnObj.IsValid())
+			{
+				Op.AdditionalData.Add(TEXT("SourceNodeGuid"), ConnObj->GetStringField(TEXT("SourceNodeGuid")));
+				Op.AdditionalData.Add(TEXT("SourcePinName"), ConnObj->GetStringField(TEXT("SourcePinName")));
+				Op.AdditionalData.Add(TEXT("TargetNodeGuid"), ConnObj->GetStringField(TEXT("TargetNodeGuid")));
+				Op.AdditionalData.Add(TEXT("TargetPinName"), ConnObj->GetStringField(TEXT("TargetPinName")));
+				
+				if (ConnObj->HasField(TEXT("SourceNodeTitle")))
+				{
+					Op.AdditionalData.Add(TEXT("SourceNodeTitle"), ConnObj->GetStringField(TEXT("SourceNodeTitle")));
+				}
+				if (ConnObj->HasField(TEXT("TargetNodeTitle")))
+				{
+					Op.AdditionalData.Add(TEXT("TargetNodeTitle"), ConnObj->GetStringField(TEXT("TargetNodeTitle")));
+				}
+				if (ConnObj->HasField(TEXT("SourceFunctionName")))
+				{
+					Op.AdditionalData.Add(TEXT("SourceFunctionName"), ConnObj->GetStringField(TEXT("SourceFunctionName")));
+				}
+				if (ConnObj->HasField(TEXT("TargetFunctionName")))
+				{
+					Op.AdditionalData.Add(TEXT("TargetFunctionName"), ConnObj->GetStringField(TEXT("TargetFunctionName")));
+				}
+			}
+			
 			OutOperations.Add(Op);
 		}
 		else if (bInBase && !bInLocal && !bInRemote)

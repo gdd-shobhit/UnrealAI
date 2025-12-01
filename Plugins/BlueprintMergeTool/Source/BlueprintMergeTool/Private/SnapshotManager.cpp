@@ -523,15 +523,50 @@ void FSnapshotManager::CaptureConnections(UEdGraph* Graph, TArray<TSharedPtr<FJs
 
 				TSharedPtr<FJsonObject> ConnectionObject = MakeShareable(new FJsonObject);
 				
+				UEdGraphNode* SourceNode = Pin->GetOwningNode();
+				UEdGraphNode* TargetNode = ConnectedPin->GetOwningNode();
+				
 				// Source (output) pin information
-				ConnectionObject->SetStringField(TEXT("SourceNodeGuid"), GetNodeStableKey(Pin->GetOwningNode()));
+				ConnectionObject->SetStringField(TEXT("SourceNodeGuid"), GetNodeStableKey(SourceNode));
 				ConnectionObject->SetStringField(TEXT("SourcePinId"), Pin->PinId.ToString());
 				ConnectionObject->SetStringField(TEXT("SourcePinName"), Pin->PinName.ToString());
 				
+				// Store source node title for semantic fallback matching (when GUIDs don't match)
+				if (SourceNode)
+				{
+					FString SourceNodeTitle = SourceNode->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
+					ConnectionObject->SetStringField(TEXT("SourceNodeTitle"), SourceNodeTitle);
+					
+					// Also store function name for function call nodes (more reliable semantic match)
+					if (UK2Node_CallFunction* CallFunctionNode = Cast<UK2Node_CallFunction>(SourceNode))
+					{
+						if (CallFunctionNode->FunctionReference.GetMemberName() != NAME_None)
+						{
+							ConnectionObject->SetStringField(TEXT("SourceFunctionName"), CallFunctionNode->FunctionReference.GetMemberName().ToString());
+						}
+					}
+				}
+				
 				// Target (input) pin information
-				ConnectionObject->SetStringField(TEXT("TargetNodeGuid"), GetNodeStableKey(ConnectedPin->GetOwningNode()));
+				ConnectionObject->SetStringField(TEXT("TargetNodeGuid"), GetNodeStableKey(TargetNode));
 				ConnectionObject->SetStringField(TEXT("TargetPinId"), ConnectedPin->PinId.ToString());
 				ConnectionObject->SetStringField(TEXT("TargetPinName"), ConnectedPin->PinName.ToString());
+				
+				// Store target node title for semantic fallback matching
+				if (TargetNode)
+				{
+					FString TargetNodeTitle = TargetNode->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
+					ConnectionObject->SetStringField(TEXT("TargetNodeTitle"), TargetNodeTitle);
+					
+					// Also store function name for function call nodes
+					if (UK2Node_CallFunction* CallFunctionNode = Cast<UK2Node_CallFunction>(TargetNode))
+					{
+						if (CallFunctionNode->FunctionReference.GetMemberName() != NAME_None)
+						{
+							ConnectionObject->SetStringField(TEXT("TargetFunctionName"), CallFunctionNode->FunctionReference.GetMemberName().ToString());
+						}
+					}
+				}
 				
 				// Connection type
 				ConnectionObject->SetStringField(TEXT("ConnectionType"), Pin->PinType.PinCategory.ToString());

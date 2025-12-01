@@ -314,6 +314,8 @@ private:
 	 * @param TargetNodeGuid Target node GUID
 	 * @param TargetPinName Target pin name
 	 * @param OutError Error message if operation fails
+	 * @param SourceNodeTitle Optional source node title for semantic fallback matching (when GUIDs don't match)
+	 * @param TargetNodeTitle Optional target node title for semantic fallback matching (when GUIDs don't match)
 	 * @return True if successful
 	 */
 	static bool LinkPins(
@@ -323,7 +325,9 @@ private:
 		const FString& SourcePinName,
 		const FString& TargetNodeGuid,
 		const FString& TargetPinName,
-		FString& OutError
+		FString& OutError,
+		const FString& SourceNodeTitle = TEXT(""),
+		const FString& TargetNodeTitle = TEXT("")
 	);
 
 	/**

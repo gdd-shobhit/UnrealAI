@@ -911,7 +911,11 @@ bool FApplyEngine::ApplyOperation(
 				if (SourcePart.Split(TEXT("."), &SourceNodeGuid, &SourcePinName) &&
 					TargetPart.Split(TEXT("."), &TargetNodeGuid, &TargetPinName))
 				{
-					return LinkPins(TargetBlueprint, Operation.TargetGraph, SourceNodeGuid, SourcePinName, TargetNodeGuid, TargetPinName, OutError);
+					// Get optional node titles for semantic fallback matching (when GUIDs don't match)
+					FString SourceNodeTitle = Operation.AdditionalData.FindRef(TEXT("SourceNodeTitle"));
+					FString TargetNodeTitle = Operation.AdditionalData.FindRef(TEXT("TargetNodeTitle"));
+					
+					return LinkPins(TargetBlueprint, Operation.TargetGraph, SourceNodeGuid, SourcePinName, TargetNodeGuid, TargetPinName, OutError, SourceNodeTitle, TargetNodeTitle);
 				}
 			}
 			OutError = TEXT("Invalid connection format for LinkPins operation");
@@ -1787,7 +1791,9 @@ bool FApplyEngine::LinkPins(
 	const FString& SourcePinName,
 	const FString& TargetNodeGuid,
 	const FString& TargetPinName,
-	FString& OutError)
+	FString& OutError,
+	const FString& SourceNodeTitle,
+	const FString& TargetNodeTitle)
 {
 	if (!Blueprint)
 	{
@@ -1802,40 +1808,84 @@ bool FApplyEngine::LinkPins(
 		return false;
 	}
 
+	// Try to find nodes by GUID first
 	UEdGraphNode* SourceNode = FindNodeByGuid(TargetGraph, SourceNodeGuid);
 	UEdGraphNode* TargetNode = FindNodeByGuid(TargetGraph, TargetNodeGuid);
 	
-	// Check if either node is in a conflicting graph that should be kept separate
-	// For "Keep Both" strategy, we need to identify conflicting graphs and skip connections between them
-	// This is a simplified approach - in a full implementation, we'd track which graphs are conflicting
-	
-	// For now, we'll skip connections if either node is not found (which might indicate a conflict)
-	// The actual conflict detection would be more sophisticated in a production system
-
 	// Debug logging
-	UE_LOG(LogTemp, Log, TEXT("LinkPins: Looking for nodes - Source: %s, Target: %s"), *SourceNodeGuid, *TargetNodeGuid);
-	UE_LOG(LogTemp, Log, TEXT("LinkPins: Found nodes - Source: %s, Target: %s"), 
+	UE_LOG(LogTemp, Log, TEXT("LinkPins: Looking for nodes - Source GUID: %s, Target GUID: %s"), *SourceNodeGuid, *TargetNodeGuid);
+	UE_LOG(LogTemp, Log, TEXT("LinkPins: Found nodes by GUID - Source: %s, Target: %s"), 
 		SourceNode ? *SourceNode->GetName() : TEXT("NULL"), 
 		TargetNode ? *TargetNode->GetName() : TEXT("NULL"));
 
+	// If GUID lookup failed, try semantic fallback (for testing without Perforce when GUIDs don't match)
 	if (!SourceNode || !TargetNode)
 	{
+		UE_LOG(LogTemp, Log, TEXT("LinkPins: GUID lookup failed, trying semantic fallback matching"));
+		
 		// List all available nodes for debugging
-		UE_LOG(LogTemp, Warning, TEXT("LinkPins: Available nodes in graph '%s':"), *GraphName);
+		UE_LOG(LogTemp, VeryVerbose, TEXT("LinkPins: Available nodes in graph '%s':"), *GraphName);
 		for (UEdGraphNode* Node : TargetGraph->Nodes)
 		{
 			if (UK2Node* K2Node = Cast<UK2Node>(Node))
 			{
-				UE_LOG(LogTemp, Warning, TEXT("  Node: %s, GUID: %s"), *Node->GetName(), *K2Node->NodeGuid.ToString());
+				FString NodeTitle = Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
+				UE_LOG(LogTemp, VeryVerbose, TEXT("  Node: %s, GUID: %s, Title: '%s'"), 
+					*Node->GetName(), *K2Node->NodeGuid.ToString(), *NodeTitle);
 			}
 			else
 			{
-				UE_LOG(LogTemp, Warning, TEXT("  Node: %s (not a K2Node)"), *Node->GetName());
+				UE_LOG(LogTemp, VeryVerbose, TEXT("  Node: %s (not a K2Node)"), *Node->GetName());
 			}
 		}
 		
-		OutError = TEXT("Source or target node not found for pin linking");
-		return false;
+		// Semantic fallback: Try to match by node title if provided
+		if (!SourceNode && !SourceNodeTitle.IsEmpty())
+		{
+			UE_LOG(LogTemp, Log, TEXT("LinkPins: Trying semantic fallback for source node with title '%s'"), *SourceNodeTitle);
+			for (UEdGraphNode* Node : TargetGraph->Nodes)
+			{
+				if (Node)
+				{
+					FString NodeTitle = Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
+					if (NodeTitle == SourceNodeTitle)
+					{
+						SourceNode = Node;
+						UE_LOG(LogTemp, Log, TEXT("LinkPins: Found source node by title: '%s' -> %s"), *SourceNodeTitle, *Node->GetName());
+						break;
+					}
+				}
+			}
+		}
+		
+		if (!TargetNode && !TargetNodeTitle.IsEmpty())
+		{
+			UE_LOG(LogTemp, Log, TEXT("LinkPins: Trying semantic fallback for target node with title '%s'"), *TargetNodeTitle);
+			for (UEdGraphNode* Node : TargetGraph->Nodes)
+			{
+				if (Node)
+				{
+					FString NodeTitle = Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
+					if (NodeTitle == TargetNodeTitle)
+					{
+						TargetNode = Node;
+						UE_LOG(LogTemp, Log, TEXT("LinkPins: Found target node by title: '%s' -> %s"), *TargetNodeTitle, *Node->GetName());
+						break;
+					}
+				}
+			}
+		}
+		
+		if (!SourceNode || !TargetNode)
+		{
+			OutError = FString::Printf(TEXT("Source or target node not found for pin linking (GUIDs: Source=%s, Target=%s). Node GUIDs may not match between different Blueprint instances. SourceNodeTitle='%s', TargetNodeTitle='%s'"), 
+				*SourceNodeGuid, *TargetNodeGuid, *SourceNodeTitle, *TargetNodeTitle);
+			return false;
+		}
+		else
+		{
+			UE_LOG(LogTemp, Log, TEXT("LinkPins: Successfully found nodes using semantic fallback matching"));
+		}
 	}
 
 	UEdGraphPin* SourcePin = FindPin(SourceNode, TEXT(""), SourcePinName);

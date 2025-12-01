@@ -6,8 +6,10 @@
 #include "DiffEngine.generated.h"
 
 // Compile-time toggle for GUID-based matching
+// This macro is defined in BlueprintMergeTool.Build.cs
 // 0 = compare by semantic/name keys (preferred for testing without VCS)
-// 1 = compare by GUIDs (preferred when Perforce ensures stable GUIDs)
+// 1 = compare by GUIDs (preferred when Perforce/Git ensures stable GUIDs)
+// If not defined in Build.cs, default to 0 (name-based matching)
 #ifndef BPT_MERGE_USE_GUID_MATCHING
 #define BPT_MERGE_USE_GUID_MATCHING 0
 #endif

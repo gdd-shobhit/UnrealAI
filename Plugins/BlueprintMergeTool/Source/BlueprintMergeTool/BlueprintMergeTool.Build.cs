@@ -80,5 +80,11 @@ public class BlueprintMergeTool : ModuleRules
 			{
 			}
 		);
+
+		// Compile-time toggle for GUID-based matching
+		// 0 = compare by name/semantic keys (preferred for testing without VCS)
+		// 1 = compare by GUIDs (preferred when Perforce/Git ensures stable GUIDs)
+		// Change this value to switch between matching strategies
+		PublicDefinitions.Add("BPT_MERGE_USE_GUID_MATCHING=0");
 	}
 }

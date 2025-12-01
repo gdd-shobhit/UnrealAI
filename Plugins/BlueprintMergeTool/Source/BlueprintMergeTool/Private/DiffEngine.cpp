@@ -315,28 +315,48 @@ void FDiffEngine::DiffVariables(
 	// 
 	// In a proper Perforce/Git integration:
 	// - Same variables should have same GUIDs across all versions
-	// - GUID comparison should be enabled in AreVariableGuidsIdentical()
-	// - This would allow for more precise conflict detection
-	//
-	// For now, we compare by name and content, with GUID comparison disabled for testing.
+	// Matching strategy is controlled by BPT_MERGE_USE_GUID_MATCHING macro:
+	// - When 0: Match by VariableName (preferred for testing without VCS)
+	// - When 1: Match by VariableGuid (preferred when Perforce/Git ensures stable GUIDs)
 	
-	// Build lookup maps by variable name (not GUID) to handle same-name variables
+	// Build lookup maps by variable name or GUID based on macro setting
 	TMap<FString, TSharedPtr<FJsonObject>> BaseVarMap, LocalVarMap, RemoteVarMap;
+#if BPT_MERGE_USE_GUID_MATCHING
+	BuildLookupMap(BaseVars, TEXT("VariableGuid"), BaseVarMap);
+	BuildLookupMap(LocalVars, TEXT("VariableGuid"), LocalVarMap);
+	BuildLookupMap(RemoteVars, TEXT("VariableGuid"), RemoteVarMap);
+#else
 	BuildLookupMap(BaseVars, TEXT("VariableName"), BaseVarMap);
 	BuildLookupMap(LocalVars, TEXT("VariableName"), LocalVarMap);
 	BuildLookupMap(RemoteVars, TEXT("VariableName"), RemoteVarMap);
+#endif
 
-	// Get union of all variable names
-	TSet<FString> AllVarNames;
-	BaseVarMap.GetKeys(AllVarNames);
-	LocalVarMap.GetKeys(AllVarNames);
-	RemoteVarMap.GetKeys(AllVarNames);
+	// Get union of all variable identifiers (name or GUID depending on macro)
+	TSet<FString> AllVarIds;
+	BaseVarMap.GetKeys(AllVarIds);
+	LocalVarMap.GetKeys(AllVarIds);
+	RemoteVarMap.GetKeys(AllVarIds);
 
-	for (const FString& VarName : AllVarNames)
+	for (const FString& VarId : AllVarIds)
 	{
-		TSharedPtr<FJsonObject> BaseVar = BaseVarMap.FindRef(VarName);
-		TSharedPtr<FJsonObject> LocalVar = LocalVarMap.FindRef(VarName);
-		TSharedPtr<FJsonObject> RemoteVar = RemoteVarMap.FindRef(VarName);
+		TSharedPtr<FJsonObject> BaseVar = BaseVarMap.FindRef(VarId);
+		TSharedPtr<FJsonObject> LocalVar = LocalVarMap.FindRef(VarId);
+		TSharedPtr<FJsonObject> RemoteVar = RemoteVarMap.FindRef(VarId);
+		
+		// Get variable name for logging/display purposes
+		FString VarName = VarId;
+		if (LocalVar.IsValid())
+		{
+			VarName = LocalVar->GetStringField(TEXT("VariableName"));
+		}
+		else if (RemoteVar.IsValid())
+		{
+			VarName = RemoteVar->GetStringField(TEXT("VariableName"));
+		}
+		else if (BaseVar.IsValid())
+		{
+			VarName = BaseVar->GetStringField(TEXT("VariableName"));
+		}
 
 		// Variable added in local only
 		if (!BaseVar.IsValid() && LocalVar.IsValid() && !RemoteVar.IsValid())
@@ -1330,13 +1350,16 @@ bool FDiffEngine::AreVariableGuidsIdentical(
 		return false;
 	}
 
+#if BPT_MERGE_USE_GUID_MATCHING
+	// When GUID matching is enabled, compare GUIDs directly
 	FString LocalGuid = LocalVar->GetStringField(TEXT("VariableGuid"));
 	FString RemoteGuid = RemoteVar->GetStringField(TEXT("VariableGuid"));
-	
-	// TODO: When Perforce/Git integration is implemented, same variables should have same GUIDs
-	// For now, we return true to skip GUID comparison during testing
-	// In production, this should be: return (LocalGuid == RemoteGuid);
-	return true; // Commented out for testing - will be enabled with Perforce integration
+	return (LocalGuid == RemoteGuid && !LocalGuid.IsEmpty());
+#else
+	// When GUID matching is disabled, always return true to skip GUID comparison
+	// This allows matching by name/semantic keys instead
+	return true;
+#endif
 }
 
 bool FDiffEngine::CompareVariablesIgnoringGuid(
@@ -1350,9 +1373,16 @@ bool FDiffEngine::CompareVariablesIgnoringGuid(
 	}
 
 	// Fields to ignore when comparing variables (these can be different without being a conflict)
-	TArray<FString> IgnoredFields = {
-		TEXT("VariableGuid") // GUIDs will be different in different Blueprint instances
-	};
+	TArray<FString> IgnoredFields;
+	
+#if BPT_MERGE_USE_GUID_MATCHING
+	// When GUID matching is enabled, we still compare GUIDs separately via AreVariableGuidsIdentical
+	// So we don't ignore GUID in content comparison - it's handled separately
+#else
+	// When GUID matching is disabled, ignore GUID differences in content comparison
+	// GUIDs will be different in different Blueprint instances when matching by name
+	IgnoredFields.Add(TEXT("VariableGuid"));
+#endif
 
 	// Get union of all field names
 	TSet<FString> AllFields;

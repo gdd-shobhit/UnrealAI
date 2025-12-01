@@ -264,6 +264,29 @@ private:
 	);
 
 	/**
+	 * Update a pin property
+	 * @param Blueprint Target blueprint
+	 * @param GraphName Name of graph containing the pin
+	 * @param NodeGuid GUID of node containing the pin
+	 * @param PinId Pin ID to identify the pin (preferred)
+	 * @param PinName Pin name to identify the pin (fallback)
+	 * @param PropertyName Property to update
+	 * @param NewValue New value for the property
+	 * @param OutError Error message if operation fails
+	 * @return True if successful
+	 */
+	static bool UpdatePinProperty(
+		UBlueprint* Blueprint,
+		const FString& GraphName,
+		const FString& NodeGuid,
+		const FString& PinId,
+		const FString& PinName,
+		const FString& PropertyName,
+		const FString& NewValue,
+		FString& OutError
+	);
+
+	/**
 	 * Move a node to a new position
 	 * @param Blueprint Target blueprint
 	 * @param GraphName Name of graph containing the node
@@ -400,6 +423,43 @@ public:
 	 * @return Pointer to variable description or nullptr if not found
 	 */
 	static FBPVariableDescription* FindVariableByGuid(UBlueprint* Blueprint, const FString& VariableGuid);
+
+private:
+	/**
+	 * Set a property value on an object from a string representation
+	 * Supports all property types including soft references, custom classes, and native types
+	 * Can be used for components, nodes, pins, and any UObject-derived class
+	 * @param ContainerObject The object containing the property (UObject*)
+	 * @param Property The property to set
+	 * @param NewValue String representation of the new value
+	 * @param OutError Error message if operation fails
+	 * @return True if successful
+	 */
+	static bool SetPropertyValueFromString(
+		UObject* ContainerObject,
+		FProperty* Property,
+		const FString& NewValue,
+		FString& OutError
+	);
+
+	/**
+	 * Set a property value on a struct from a string representation
+	 * Supports all property types including soft references, custom classes, and native types
+	 * Can be used for USTRUCT types like FBPVariableDescription
+	 * @param ContainerStruct The struct instance containing the property (void*)
+	 * @param StructType The struct type (UScriptStruct*)
+	 * @param Property The property to set
+	 * @param NewValue String representation of the new value
+	 * @param OutError Error message if operation fails
+	 * @return True if successful
+	 */
+	static bool SetPropertyValueFromString(
+		void* ContainerStruct,
+		UScriptStruct* StructType,
+		FProperty* Property,
+		const FString& NewValue,
+		FString& OutError
+	);
 
 	/**
 	 * Create a new node in a graph based on JSON data

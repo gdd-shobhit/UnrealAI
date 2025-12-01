@@ -551,7 +551,7 @@ void FDiffEngine::DiffGraphs(
 
 	// Build lookup maps by a stable graph key (FunctionName if present, else GraphName)
 	TMap<FString, TSharedPtr<FJsonObject>> BaseGraphMap, LocalGraphMap, RemoteGraphMap;
-	auto BuildGraphMap = [&DiffableGraphTypes](const TArray<TSharedPtr<FJsonValue>>& Graphs, TMap<FString, TSharedPtr<FJsonObject>>& OutMap)
+	auto BuildGraphMap = [](const TArray<TSharedPtr<FJsonValue>>& Graphs, TMap<FString, TSharedPtr<FJsonObject>>& OutMap)
 	{
 		for (const TSharedPtr<FJsonValue>& GraphValue : Graphs)
 		{
@@ -563,7 +563,12 @@ void FDiffEngine::DiffGraphs(
 			FString GraphType = GraphObj->GetStringField(TEXT("GraphType"));
 			
 			// Skip graphs that are not in the diffable types list
-			if (!DiffableGraphTypes.Contains(GraphType))
+			static const TSet<FString> DiffableTypes = {
+				TEXT("EventGraph"),
+				TEXT("ConstructionScript"),
+				TEXT("Function")
+			};
+			if (!DiffableTypes.Contains(GraphType))
 			{
 				UE_LOG(LogTemp, Verbose, TEXT("DiffEngine: Skipping graph type '%s' (not in diffable types)"), *GraphType);
 				continue;

@@ -31,6 +31,11 @@
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonSerializer.h"
 #include "Engine/SCS_Node.h"
+#include "UObject/PropertyPortFlags.h"
+#include "UObject/UnrealType.h"
+#include "Math/Vector.h"
+#include "Math/Rotator.h"
+#include "Math/Color.h"
 
 bool FApplyEngine::ApplyMergePlan(
 	UBlueprint* TargetBlueprint,
@@ -1358,31 +1363,58 @@ bool FApplyEngine::UpdateVariable(
 		return false;
 	}
 
-	// Update the specified property
-	if (PropertyName == TEXT("DefaultValue"))
+	// Special handling for Tooltip (stored in MetaDataArray)
+	if (PropertyName == TEXT("Tooltip"))
 	{
-		Variable->DefaultValue = NewValue;
+		int32 TooltipIndex = Variable->FindMetaDataEntryIndexForKey(TEXT("Tooltip"));
+		if (TooltipIndex == INDEX_NONE)
+		{
+			// Add new tooltip metadata entry
+			FBPVariableMetaDataEntry TooltipEntry;
+			TooltipEntry.DataKey = TEXT("Tooltip");
+			TooltipEntry.DataValue = NewValue;
+			Variable->MetaDataArray.Add(TooltipEntry);
+		}
+		else
+		{
+			// Update existing tooltip metadata entry
+			Variable->MetaDataArray[TooltipIndex].DataValue = NewValue;
+		}
+		
+		// Mark Blueprint as modified
+		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+		
+		UE_LOG(LogTemp, VeryVerbose, TEXT("Updated variable %s property %s = %s"), 
+			*Variable->VarName.ToString(), *PropertyName, *NewValue);
+		return true;
 	}
-	else if (PropertyName == TEXT("Category"))
+
+	// Use reflection to find and set the property on FBPVariableDescription struct
+	UScriptStruct* VariableStruct = FBPVariableDescription::StaticStruct();
+	if (!VariableStruct)
 	{
-		Variable->Category = FText::FromString(NewValue);
-	}
-	else if (PropertyName == TEXT("FriendlyName"))
-	{
-		Variable->FriendlyName = NewValue;
-	}
-	else if (PropertyName == TEXT("Tooltip"))
-	{
-		Variable->MetaDataArray[Variable->FindMetaDataEntryIndexForKey(TEXT("Tooltip"))].DataValue = NewValue;
-	}
-	else
-	{
-		OutError = FString::Printf(TEXT("Unknown variable property: %s"), *PropertyName);
+		OutError = TEXT("Failed to get FBPVariableDescription struct type");
 		return false;
 	}
 
-	UE_LOG(LogTemp, VeryVerbose, TEXT("Updated variable %s property %s = %s"), 
-		*Variable->VarName.ToString(), *PropertyName, *NewValue);
+	FProperty* Property = FindFProperty<FProperty>(VariableStruct, *PropertyName);
+	if (!Property)
+	{
+		OutError = FString::Printf(TEXT("Property '%s' not found on FBPVariableDescription"), *PropertyName);
+		return false;
+	}
+
+	// Use the reusable property setting function for structs
+	if (!SetPropertyValueFromString(Variable, VariableStruct, Property, NewValue, OutError))
+	{
+		return false;
+	}
+
+	// Mark Blueprint as modified
+	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+	UE_LOG(LogTemp, VeryVerbose, TEXT("Updated variable %s property %s = %s (type: %s)"), 
+		*Variable->VarName.ToString(), *PropertyName, *NewValue, *Property->GetClass()->GetName());
 	return true;
 }
 
@@ -1533,27 +1565,183 @@ bool FApplyEngine::UpdateNodeProperty(
 	// and by the LinkPins function skipping connections for conflicting elements
 	UE_LOG(LogTemp, Log, TEXT("UpdateNodeProperty: Processing node %s in graph %s"), *NodeGuid, *GraphName);
 
-	// Update specific properties based on node type and property name
-	if (PropertyName == TEXT("NodeComment"))
+	// Try to find the property using reflection first
+	UClass* NodeClass = TargetNode->GetClass();
+	FProperty* Property = FindFProperty<FProperty>(NodeClass, *PropertyName);
+	
+	// If property not found, try parent classes
+	if (!Property)
 	{
-		TargetNode->NodeComment = NewValue;
-	}
-	else if (PropertyName == TEXT("NodeTitle"))
-	{
-		// Node title is usually read-only, but we can update the underlying data for some node types
-		if (UK2Node_CustomEvent* CustomEvent = Cast<UK2Node_CustomEvent>(TargetNode))
+		for (UClass* CurrentClass = NodeClass; CurrentClass; CurrentClass = CurrentClass->GetSuperClass())
 		{
-			CustomEvent->CustomFunctionName = FName(*NewValue);
-			CustomEvent->ReconstructNode();
+			Property = FindFProperty<FProperty>(CurrentClass, *PropertyName);
+			if (Property)
+			{
+				break;
+			}
+		}
+	}
+
+	// If property found, use the reusable function
+	if (Property)
+	{
+		if (!SetPropertyValueFromString(TargetNode, Property, NewValue, OutError))
+		{
+			return false;
+		}
+		
+		// Special handling for properties that require node reconstruction
+		if (PropertyName == TEXT("NodeTitle") || PropertyName == TEXT("CustomFunctionName"))
+		{
+			if (UK2Node_CustomEvent* CustomEvent = Cast<UK2Node_CustomEvent>(TargetNode))
+			{
+				CustomEvent->ReconstructNode();
+			}
 		}
 	}
 	else
 	{
-		OutError = FString::Printf(TEXT("Unknown node property: %s"), *PropertyName);
-		return false;
+		// Fallback to hardcoded properties for backward compatibility
+		if (PropertyName == TEXT("NodeComment"))
+		{
+			TargetNode->NodeComment = NewValue;
+		}
+		else if (PropertyName == TEXT("NodeTitle"))
+		{
+			// Node title is usually read-only, but we can update the underlying data for some node types
+			if (UK2Node_CustomEvent* CustomEvent = Cast<UK2Node_CustomEvent>(TargetNode))
+			{
+				CustomEvent->CustomFunctionName = FName(*NewValue);
+				CustomEvent->ReconstructNode();
+			}
+		}
+		else
+		{
+			OutError = FString::Printf(TEXT("Property '%s' not found on node (class: %s)"), 
+				*PropertyName, *NodeClass->GetName());
+			return false;
+		}
 	}
 
 	UE_LOG(LogTemp, VeryVerbose, TEXT("Updated node %s property %s = %s"), *NodeGuid, *PropertyName, *NewValue);
+	return true;
+}
+
+bool FApplyEngine::UpdatePinProperty(
+	UBlueprint* Blueprint,
+	const FString& GraphName,
+	const FString& NodeGuid,
+	const FString& PinId,
+	const FString& PinName,
+	const FString& PropertyName,
+	const FString& NewValue,
+	FString& OutError)
+{
+	if (!Blueprint)
+	{
+		OutError = TEXT("Blueprint is null");
+		return false;
+	}
+
+	UEdGraph* TargetGraph = FindGraphByName(Blueprint, GraphName);
+	if (!TargetGraph)
+	{
+		OutError = FString::Printf(TEXT("Graph '%s' not found"), *GraphName);
+		return false;
+	}
+
+	UEdGraphNode* TargetNode = FindNodeByGuid(TargetGraph, NodeGuid);
+	if (!TargetNode)
+	{
+		OutError = FString::Printf(TEXT("Node with GUID %s not found"), *NodeGuid);
+		return false;
+	}
+
+	UEdGraphPin* TargetPin = FindPin(TargetNode, PinId, PinName);
+	if (!TargetPin)
+	{
+		OutError = FString::Printf(TEXT("Pin not found (PinId: %s, PinName: %s)"), *PinId, *PinName);
+		return false;
+	}
+
+	// UEdGraphPin is NOT a UObject - it's a regular C++ class, so we handle properties directly
+	// Common pin properties that can be updated
+	if (PropertyName == TEXT("DefaultValue"))
+	{
+		TargetPin->DefaultValue = NewValue;
+	}
+	else if (PropertyName == TEXT("PinName"))
+	{
+		TargetPin->PinName = FName(*NewValue);
+	}
+	else if (PropertyName == TEXT("bHidden"))
+	{
+		TargetPin->bHidden = NewValue.ToBool();
+	}
+	else if (PropertyName == TEXT("bNotConnectable"))
+	{
+		TargetPin->bNotConnectable = NewValue.ToBool();
+	}
+	else if (PropertyName == TEXT("bDefaultValueIsReadOnly"))
+	{
+		TargetPin->bDefaultValueIsReadOnly = NewValue.ToBool();
+	}
+	else if (PropertyName == TEXT("DefaultObject"))
+	{
+		// Handle default object reference
+		if (NewValue.IsEmpty())
+		{
+			TargetPin->DefaultObject = nullptr;
+		}
+		else
+		{
+			UObject* LoadedObject = LoadObject<UObject>(nullptr, *NewValue);
+			if (!LoadedObject)
+			{
+				LoadedObject = StaticLoadObject(UObject::StaticClass(), nullptr, *NewValue);
+			}
+			if (LoadedObject)
+			{
+				TargetPin->DefaultObject = LoadedObject;
+			}
+			else
+			{
+				OutError = FString::Printf(TEXT("Failed to load default object '%s' for pin"), *NewValue);
+				return false;
+			}
+		}
+	}
+	else if (PropertyName == TEXT("Direction"))
+	{
+		// Handle pin direction
+		if (NewValue == TEXT("Input") || NewValue == TEXT("EGPD_Input"))
+		{
+			TargetPin->Direction = EGPD_Input;
+		}
+		else if (NewValue == TEXT("Output") || NewValue == TEXT("EGPD_Output"))
+		{
+			TargetPin->Direction = EGPD_Output;
+		}
+		else
+		{
+			OutError = FString::Printf(TEXT("Invalid pin direction: %s (expected 'Input' or 'Output')"), *NewValue);
+			return false;
+		}
+	}
+	else
+	{
+		OutError = FString::Printf(TEXT("Property '%s' is not supported for pin updates. Supported properties: DefaultValue, PinName, bHidden, bNotConnectable, bDefaultValueIsReadOnly, DefaultObject, Direction"), *PropertyName);
+		return false;
+	}
+
+	// Mark the pin's node as modified (pins are owned by nodes)
+	TargetNode->Modify();
+	
+	// Mark Blueprint as modified
+	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+	UE_LOG(LogTemp, VeryVerbose, TEXT("Updated pin %s.%s property %s = %s"), 
+		*NodeGuid, *TargetPin->PinName.ToString(), *PropertyName, *NewValue);
 	return true;
 }
 
@@ -1924,42 +2112,538 @@ bool FApplyEngine::UpdateComponent(
 		return false;
 	}
 
-	// Update properties based on property name
-	if (PropertyName == TEXT("RelativeLocation"))
+	if (!ComponentNode->ComponentTemplate)
 	{
-		if (USceneComponent* SceneComp = Cast<USceneComponent>(ComponentNode->ComponentTemplate))
-		{
-			FVector Location;
-			if (Location.InitFromString(NewValue))
-			{
-				SceneComp->SetRelativeLocation(Location);
-			}
-		}
+		OutError = FString::Printf(TEXT("Component '%s' has no template"), *ComponentName);
+		return false;
 	}
-	else if (PropertyName == TEXT("RelativeRotation"))
+
+	UActorComponent* ComponentTemplate = ComponentNode->ComponentTemplate;
+	UClass* ComponentClass = ComponentTemplate->GetClass();
+
+	// Find the property using reflection
+	FProperty* Property = FindFProperty<FProperty>(ComponentClass, *PropertyName);
+	if (!Property)
 	{
-		if (USceneComponent* SceneComp = Cast<USceneComponent>(ComponentNode->ComponentTemplate))
+		// Try finding in parent classes
+		for (UClass* CurrentClass = ComponentClass; CurrentClass; CurrentClass = CurrentClass->GetSuperClass())
 		{
-			FRotator Rotation;
-			if (Rotation.InitFromString(NewValue))
+			Property = FindFProperty<FProperty>(CurrentClass, *PropertyName);
+			if (Property)
 			{
-				SceneComp->SetRelativeRotation(Rotation);
-			}
-		}
-	}
-	else if (PropertyName == TEXT("RelativeScale"))
-	{
-		if (USceneComponent* SceneComp = Cast<USceneComponent>(ComponentNode->ComponentTemplate))
-		{
-			FVector Scale;
-			if (Scale.InitFromString(NewValue))
-			{
-				SceneComp->SetRelativeScale3D(Scale);
+				break;
 			}
 		}
 	}
 
-	UE_LOG(LogTemp, VeryVerbose, TEXT("Updated component %s property %s = %s"), *ComponentName, *PropertyName, *NewValue);
+	if (!Property)
+	{
+		OutError = FString::Printf(TEXT("Property '%s' not found on component '%s' (class: %s)"), 
+			*PropertyName, *ComponentName, *ComponentClass->GetName());
+		return false;
+	}
+
+	// Check if property is editable/read-write
+	if (Property->HasAnyPropertyFlags(CPF_DisableEditOnInstance))
+	{
+		OutError = FString::Printf(TEXT("Property '%s' is not editable on instance"), *PropertyName);
+		return false;
+	}
+
+	// Use the reusable property setting function
+	if (!SetPropertyValueFromString(ComponentTemplate, Property, NewValue, OutError))
+	{
+		return false;
+	}
+
+	// Mark component template as modified
+	ComponentTemplate->Modify();
+	
+	// Mark Blueprint as modified so changes are saved
+	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+	UE_LOG(LogTemp, VeryVerbose, TEXT("Updated component %s property %s = %s (type: %s)"), 
+		*ComponentName, *PropertyName, *NewValue, *Property->GetClass()->GetName());
+	return true;
+}
+
+bool FApplyEngine::SetPropertyValueFromString(
+	UObject* ContainerObject,
+	FProperty* Property,
+	const FString& NewValue,
+	FString& OutError)
+{
+	if (!ContainerObject || !Property)
+	{
+		OutError = TEXT("Invalid container object or property");
+		return false;
+	}
+
+	// Set property value based on type using reflection
+	bool bSuccess = false;
+	
+	// Handle different property types
+	if (FStrProperty* StrProperty = CastField<FStrProperty>(Property))
+	{
+		StrProperty->SetPropertyValue_InContainer(ContainerObject, NewValue);
+		bSuccess = true;
+	}
+	else if (FNameProperty* NameProperty = CastField<FNameProperty>(Property))
+	{
+		NameProperty->SetPropertyValue_InContainer(ContainerObject, FName(*NewValue));
+		bSuccess = true;
+	}
+	else if (FTextProperty* TextProperty = CastField<FTextProperty>(Property))
+	{
+		TextProperty->SetPropertyValue_InContainer(ContainerObject, FText::FromString(NewValue));
+		bSuccess = true;
+	}
+	else if (FBoolProperty* BoolProperty = CastField<FBoolProperty>(Property))
+	{
+		bool bValue = NewValue.ToBool();
+		BoolProperty->SetPropertyValue_InContainer(ContainerObject, bValue);
+		bSuccess = true;
+	}
+	else if (FIntProperty* IntProperty = CastField<FIntProperty>(Property))
+	{
+		int32 Value = FCString::Atoi(*NewValue);
+		IntProperty->SetPropertyValue_InContainer(ContainerObject, Value);
+		bSuccess = true;
+	}
+	else if (FInt64Property* Int64Property = CastField<FInt64Property>(Property))
+	{
+		int64 Value = FCString::Atoi64(*NewValue);
+		Int64Property->SetPropertyValue_InContainer(ContainerObject, Value);
+		bSuccess = true;
+	}
+	else if (FFloatProperty* FloatProperty = CastField<FFloatProperty>(Property))
+	{
+		float Value = FCString::Atof(*NewValue);
+		FloatProperty->SetPropertyValue_InContainer(ContainerObject, Value);
+		bSuccess = true;
+	}
+	else if (FDoubleProperty* DoubleProperty = CastField<FDoubleProperty>(Property))
+	{
+		double Value = FCString::Atod(*NewValue);
+		DoubleProperty->SetPropertyValue_InContainer(ContainerObject, Value);
+		bSuccess = true;
+	}
+	else if (FByteProperty* ByteProperty = CastField<FByteProperty>(Property))
+	{
+		uint8 Value = (uint8)FCString::Atoi(*NewValue);
+		ByteProperty->SetPropertyValue_InContainer(ContainerObject, Value);
+		bSuccess = true;
+	}
+	else if (FStructProperty* StructProperty = CastField<FStructProperty>(Property))
+	{
+		// Handle common struct types that support InitFromString
+		UScriptStruct* Struct = StructProperty->Struct;
+		if (Struct)
+		{
+			void* StructValue = StructProperty->ContainerPtrToValuePtr<void>(ContainerObject);
+			
+			// Handle FVector
+			if (Struct == TBaseStructure<FVector>::Get())
+			{
+				FVector* VectorValue = (FVector*)StructValue;
+				if (VectorValue->InitFromString(NewValue))
+				{
+					bSuccess = true;
+				}
+			}
+			// Handle FRotator
+			else if (Struct == TBaseStructure<FRotator>::Get())
+			{
+				FRotator* RotatorValue = (FRotator*)StructValue;
+				if (RotatorValue->InitFromString(NewValue))
+				{
+					bSuccess = true;
+				}
+			}
+			// Handle FLinearColor
+			else if (Struct == TBaseStructure<FLinearColor>::Get())
+			{
+				FLinearColor* ColorValue = (FLinearColor*)StructValue;
+				if (ColorValue->InitFromString(NewValue))
+				{
+					bSuccess = true;
+				}
+			}
+			// Handle FColor
+			else if (Struct == TBaseStructure<FColor>::Get())
+			{
+				FColor* ColorValue = (FColor*)StructValue;
+				if (ColorValue->InitFromString(NewValue))
+				{
+					bSuccess = true;
+				}
+			}
+			// Generic struct parsing - try ImportText
+			else
+			{
+				const TCHAR* ValuePtr = *NewValue;
+				if (Struct->ImportText(ValuePtr, StructValue, nullptr, PPF_None, nullptr, Struct->GetName()))
+				{
+					bSuccess = true;
+				}
+			}
+		}
+	}
+	else if (FSoftObjectProperty* SoftObjectProperty = CastField<FSoftObjectProperty>(Property))
+	{
+		// Handle soft object references (lazy loading)
+		if (!NewValue.IsEmpty())
+		{
+			FSoftObjectPtr SoftPtr(NewValue);
+			SoftObjectProperty->SetPropertyValue_InContainer(ContainerObject, SoftPtr);
+			bSuccess = true;
+		}
+		else
+		{
+			// Set to null/empty
+			FSoftObjectPtr EmptyPtr;
+			SoftObjectProperty->SetPropertyValue_InContainer(ContainerObject, EmptyPtr);
+			bSuccess = true;
+		}
+	}
+	else if (FSoftClassProperty* SoftClassProperty = CastField<FSoftClassProperty>(Property))
+	{
+		// Handle soft class references
+		if (!NewValue.IsEmpty())
+		{
+			FSoftObjectPtr SoftClassPtr(NewValue);
+			SoftClassProperty->SetPropertyValue_InContainer(ContainerObject, SoftClassPtr);
+			bSuccess = true;
+		}
+		else
+		{
+			FSoftObjectPtr EmptyPtr;
+			SoftClassProperty->SetPropertyValue_InContainer(ContainerObject, EmptyPtr);
+			bSuccess = true;
+		}
+	}
+	else if (FClassProperty* ClassProperty = CastField<FClassProperty>(Property))
+	{
+		// Handle class references (UClass*)
+		if (!NewValue.IsEmpty())
+		{
+			UClass* FoundClass = nullptr;
+			
+			// Try multiple methods to find the class
+			// 1. Try FindObject with full path
+			FoundClass = FindObject<UClass>(nullptr, *NewValue);
+			
+			// 2. Try LoadObject (for Blueprint classes)
+			if (!FoundClass)
+			{
+				FoundClass = LoadObject<UClass>(nullptr, *NewValue);
+			}
+			
+			// 3. Try StaticLoadClass for Blueprint classes
+			if (!FoundClass && NewValue.Contains(TEXT(".")))
+			{
+				FString PackageName, ClassName;
+				if (NewValue.Split(TEXT("."), &PackageName, &ClassName))
+				{
+					FoundClass = StaticLoadClass(UObject::StaticClass(), nullptr, *NewValue);
+				}
+			}
+			
+			// 4. Try to find by name in all loaded classes
+			if (!FoundClass)
+			{
+				// Extract class name from path if it's a path
+				FString ClassName = NewValue;
+				int32 LastDot = NewValue.Find(TEXT("."), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+				if (LastDot != INDEX_NONE)
+				{
+					ClassName = NewValue.Mid(LastDot + 1);
+				}
+				
+				// Search through all loaded classes
+				for (TObjectIterator<UClass> ClassIt; ClassIt; ++ClassIt)
+				{
+					UClass* CurrentClass = *ClassIt;
+					if (CurrentClass && CurrentClass->GetName() == ClassName)
+					{
+						// Check if it matches the expected base class
+						if (ClassProperty->MetaClass && CurrentClass->IsChildOf(ClassProperty->MetaClass))
+						{
+							FoundClass = CurrentClass;
+							break;
+						}
+						else if (!ClassProperty->MetaClass)
+						{
+							FoundClass = CurrentClass;
+							break;
+						}
+					}
+				}
+			}
+			
+			if (FoundClass)
+			{
+				// Validate the class matches the expected type
+				if (ClassProperty->MetaClass && !FoundClass->IsChildOf(ClassProperty->MetaClass))
+				{
+					OutError = FString::Printf(TEXT("Class '%s' is not a subclass of '%s'"), 
+						*FoundClass->GetName(), *ClassProperty->MetaClass->GetName());
+					return false;
+				}
+				
+				ClassProperty->SetPropertyValue_InContainer(ContainerObject, FoundClass);
+				bSuccess = true;
+			}
+			else
+			{
+				OutError = FString::Printf(TEXT("Failed to find class '%s' (expected base: %s)"), 
+					*NewValue, ClassProperty->MetaClass ? *ClassProperty->MetaClass->GetName() : TEXT("Any"));
+			}
+		}
+		else
+		{
+			// Set to null/empty
+			ClassProperty->SetPropertyValue_InContainer(ContainerObject, nullptr);
+			bSuccess = true;
+		}
+	}
+	else if (FObjectProperty* ObjectProperty = CastField<FObjectProperty>(Property))
+	{
+		// Handle regular object references - supports custom Blueprint classes and C++ classes
+		if (!NewValue.IsEmpty())
+		{
+			UObject* LoadedObject = nullptr;
+			
+			// Try multiple methods to load the object
+			// 1. Try LoadObject with full path (works for assets)
+			LoadedObject = LoadObject<UObject>(nullptr, *NewValue);
+			
+			// 2. If that fails and it looks like a Blueprint class path, try loading the Blueprint
+			if (!LoadedObject && NewValue.Contains(TEXT("_C")))
+			{
+				// Blueprint classes have _C suffix, try loading the Blueprint first
+				FString BlueprintPath = NewValue;
+				BlueprintPath.RemoveFromEnd(TEXT("_C"));
+				UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
+				if (Blueprint && Blueprint->GeneratedClass)
+				{
+					LoadedObject = Blueprint->GeneratedClass;
+				}
+			}
+			
+			// 3. Try StaticLoadObject for more flexibility
+			if (!LoadedObject)
+			{
+				LoadedObject = StaticLoadObject(UObject::StaticClass(), nullptr, *NewValue);
+			}
+			
+			// 4. If it's a class path, try to find the class
+			if (!LoadedObject && ObjectProperty->PropertyClass && ObjectProperty->PropertyClass->IsChildOf<UClass>())
+			{
+				UClass* FoundClass = FindObject<UClass>(nullptr, *NewValue);
+				if (!FoundClass)
+				{
+					FoundClass = LoadObject<UClass>(nullptr, *NewValue);
+				}
+				LoadedObject = FoundClass;
+			}
+			
+			// 5. Try using AssetRegistry to find the asset
+			if (!LoadedObject)
+			{
+				FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+				IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+				
+				// Convert path to object path format
+				FString ObjectPath = NewValue;
+				if (!ObjectPath.StartsWith(TEXT("/")))
+				{
+					ObjectPath = FString::Printf(TEXT("/Game/%s"), *ObjectPath);
+				}
+				
+				// Use Soft Object Path (new API)
+				FSoftObjectPath SoftPath(ObjectPath);
+				FAssetData AssetData = AssetRegistry.GetAssetByObjectPath(SoftPath);
+				if (AssetData.IsValid())
+				{
+					LoadedObject = AssetData.GetAsset();
+				}
+			}
+			
+			if (LoadedObject)
+			{
+				// Validate the loaded object matches the expected type
+				if (ObjectProperty->PropertyClass && !LoadedObject->IsA(ObjectProperty->PropertyClass))
+				{
+					OutError = FString::Printf(TEXT("Loaded object '%s' (type: %s) is not of expected type '%s'"), 
+						*NewValue, *LoadedObject->GetClass()->GetName(), *ObjectProperty->PropertyClass->GetName());
+					return false;
+				}
+				
+				ObjectProperty->SetPropertyValue_InContainer(ContainerObject, LoadedObject);
+				bSuccess = true;
+			}
+			else
+			{
+				OutError = FString::Printf(TEXT("Failed to load object '%s' of type '%s'. Tried: LoadObject, StaticLoadObject, AssetRegistry. Path may be incorrect or asset not loaded."), 
+					*NewValue, ObjectProperty->PropertyClass ? *ObjectProperty->PropertyClass->GetName() : TEXT("Unknown"));
+			}
+		}
+		else
+		{
+			// Set to null/empty
+			ObjectProperty->SetPropertyValue_InContainer(ContainerObject, nullptr);
+			bSuccess = true;
+		}
+	}
+	else if (FEnumProperty* EnumProperty = CastField<FEnumProperty>(Property))
+	{
+		// Try to parse enum value by name or value
+		UEnum* Enum = EnumProperty->GetEnum();
+		if (Enum)
+		{
+			int64 EnumValue = Enum->GetValueByNameString(NewValue, EGetByNameFlags::CheckAuthoredName);
+			if (EnumValue == INDEX_NONE)
+			{
+				// Try parsing as integer
+				EnumValue = FCString::Atoi64(*NewValue);
+			}
+			if (Enum->IsValidEnumValue(EnumValue))
+			{
+				FNumericProperty* UnderlyingProperty = EnumProperty->GetUnderlyingProperty();
+				if (UnderlyingProperty)
+				{
+					void* ValuePtr = EnumProperty->ContainerPtrToValuePtr<void>(ContainerObject);
+					UnderlyingProperty->SetIntPropertyValue(ValuePtr, EnumValue);
+					bSuccess = true;
+				}
+			}
+		}
+	}
+	else
+	{
+		// Try generic ImportText_Direct for other property types
+		const TCHAR* ValuePtr = *NewValue;
+		void* ValueAddr = Property->ContainerPtrToValuePtr<void>(ContainerObject);
+		
+		// Use ImportText_Direct which is available on FProperty
+		if (Property->ImportText_Direct(ValuePtr, ValueAddr, nullptr, PPF_None))
+		{
+			bSuccess = true;
+		}
+	}
+
+	if (!bSuccess)
+	{
+		OutError = FString::Printf(TEXT("Failed to set property '%s' (type: %s) to value '%s'"), 
+			*Property->GetName(), *Property->GetClass()->GetName(), *NewValue);
+		return false;
+	}
+
+	return true;
+}
+
+bool FApplyEngine::SetPropertyValueFromString(
+	void* ContainerStruct,
+	UScriptStruct* StructType,
+	FProperty* Property,
+	const FString& NewValue,
+	FString& OutError)
+{
+	if (!ContainerStruct || !StructType || !Property)
+	{
+		OutError = TEXT("Invalid container struct, struct type, or property");
+		return false;
+	}
+
+	// Get the property value pointer
+	void* PropertyValuePtr = Property->ContainerPtrToValuePtr<void>(ContainerStruct);
+
+	// Set property value based on type using reflection
+	bool bSuccess = false;
+	
+	// Handle different property types
+	if (FStrProperty* StrProperty = CastField<FStrProperty>(Property))
+	{
+		StrProperty->SetPropertyValue(PropertyValuePtr, NewValue);
+		bSuccess = true;
+	}
+	else if (FNameProperty* NameProperty = CastField<FNameProperty>(Property))
+	{
+		NameProperty->SetPropertyValue(PropertyValuePtr, FName(*NewValue));
+		bSuccess = true;
+	}
+	else if (FTextProperty* TextProperty = CastField<FTextProperty>(Property))
+	{
+		TextProperty->SetPropertyValue(PropertyValuePtr, FText::FromString(NewValue));
+		bSuccess = true;
+	}
+	else if (FBoolProperty* BoolProperty = CastField<FBoolProperty>(Property))
+	{
+		bool bValue = NewValue.ToBool();
+		BoolProperty->SetPropertyValue(PropertyValuePtr, bValue);
+		bSuccess = true;
+	}
+	else if (FIntProperty* IntProperty = CastField<FIntProperty>(Property))
+	{
+		int32 Value = FCString::Atoi(*NewValue);
+		IntProperty->SetPropertyValue(PropertyValuePtr, Value);
+		bSuccess = true;
+	}
+	else if (FInt64Property* Int64Property = CastField<FInt64Property>(Property))
+	{
+		int64 Value = FCString::Atoi64(*NewValue);
+		Int64Property->SetPropertyValue(PropertyValuePtr, Value);
+		bSuccess = true;
+	}
+	else if (FFloatProperty* FloatProperty = CastField<FFloatProperty>(Property))
+	{
+		float Value = FCString::Atof(*NewValue);
+		FloatProperty->SetPropertyValue(PropertyValuePtr, Value);
+		bSuccess = true;
+	}
+	else if (FDoubleProperty* DoubleProperty = CastField<FDoubleProperty>(Property))
+	{
+		double Value = FCString::Atod(*NewValue);
+		DoubleProperty->SetPropertyValue(PropertyValuePtr, Value);
+		bSuccess = true;
+	}
+	else if (FByteProperty* ByteProperty = CastField<FByteProperty>(Property))
+	{
+		uint8 Value = (uint8)FCString::Atoi(*NewValue);
+		ByteProperty->SetPropertyValue(PropertyValuePtr, Value);
+		bSuccess = true;
+	}
+	else if (FStructProperty* StructProperty = CastField<FStructProperty>(Property))
+	{
+		// Handle struct properties (like FEdGraphPinType, FGuid, etc.)
+		UScriptStruct* Struct = StructProperty->Struct;
+		if (Struct)
+		{
+			const TCHAR* ValuePtr = *NewValue;
+			if (Struct->ImportText(ValuePtr, PropertyValuePtr, nullptr, PPF_None, nullptr, Struct->GetName()))
+			{
+				bSuccess = true;
+			}
+		}
+	}
+	else
+	{
+		// Try generic ImportText_Direct for other property types
+		const TCHAR* ValuePtr = *NewValue;
+		if (Property->ImportText_Direct(ValuePtr, PropertyValuePtr, nullptr, PPF_None))
+		{
+			bSuccess = true;
+		}
+	}
+
+	if (!bSuccess)
+	{
+		OutError = FString::Printf(TEXT("Failed to set property '%s' (type: %s) to value '%s'"), 
+			*Property->GetName(), *Property->GetClass()->GetName(), *NewValue);
+		return false;
+	}
+
 	return true;
 }
 
@@ -2725,4 +3409,6 @@ bool FApplyEngine::ValidateCustomClassAvailability(
 	
 	return bAllClassesAvailable;
 }
+
+
 

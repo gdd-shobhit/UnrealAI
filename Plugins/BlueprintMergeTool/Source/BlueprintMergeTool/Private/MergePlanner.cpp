@@ -23,12 +23,16 @@ bool FMergePlanner::CreateMergePlan(
 	// Start with all non-conflicting operations
 	OutMergePlan.AutoResolvedOperations = DiffResult.Operations;
 
+	// Detect and handle function-level conflicts (conflicts within functions)
+	TArray<FMergeConflict> ProcessedConflicts;
+	DetectFunctionLevelConflicts(DiffResult.Conflicts, DiffResult, ProcessedConflicts);
+
 	// Apply automatic resolution to conflicts
 	TArray<FMergeOperation> ConflictResolutions;
 	TArray<FMergeConflict> UnresolvedConflicts;
 	
 	ApplyAutomaticResolution(
-		DiffResult.Conflicts,
+		ProcessedConflicts,
 		Config,
 		ConflictResolutions,
 		UnresolvedConflicts
@@ -124,6 +128,32 @@ void FMergePlanner::ApplyAutomaticResolution(
 			{
 				UE_LOG(LogTemp, Log, TEXT("MergePlanner: Using ResolveVariableConflict for Variable"));
 				bResolved = ResolveVariableConflict(Conflict, Config, ResolutionOps);
+			}
+			else if (Conflict.ConflictType == TEXT("FunctionWithInternalConflicts"))
+			{
+				// Handle function-level conflicts: copy entire function from remote and mark as conflicted
+				UE_LOG(LogTemp, Log, TEXT("MergePlanner: Resolving FunctionWithInternalConflicts for function '%s'"), *Conflict.ElementName);
+				
+				// Create an AddGraph operation to copy the remote function
+				FMergeOperation Op = FDiffEngine::CreateOperation(EMergeOperationType::AddGraph, Conflict.GraphName, Conflict.GraphName);
+				Op.AdditionalData.Add(TEXT("Source"), TEXT("Remote"));
+				Op.AdditionalData.Add(TEXT("ConflictResolution"), TEXT("CopyFunctionWithConflicts"));
+				Op.AdditionalData.Add(TEXT("MarkAsConflicted"), TEXT("true"));
+				Op.AdditionalData.Add(TEXT("PreserveGuids"), TEXT("true"));
+				
+				// Use the remote graph data if available
+				if (!Conflict.RemoteData.IsEmpty())
+				{
+					Op.AdditionalData.Add(TEXT("GraphData"), Conflict.RemoteData);
+					UE_LOG(LogTemp, Log, TEXT("MergePlanner: FunctionWithInternalConflicts - using remote graph data for '%s'"), *Conflict.ElementName);
+				}
+				else
+				{
+					UE_LOG(LogTemp, Warning, TEXT("MergePlanner: FunctionWithInternalConflicts - no remote graph data available for '%s'"), *Conflict.ElementName);
+				}
+				
+				ResolutionOps.Add(Op);
+				bResolved = true;
 			}
 			else if (Conflict.ConflictType == TEXT("Node") || Conflict.ConflictType == TEXT("Graph") || Conflict.ConflictType == TEXT("Function"))
 			{
@@ -936,6 +966,139 @@ void FMergePlanner::OptimizeOperationOrder(
 
 	UE_LOG(LogTemp, VeryVerbose, TEXT("Optimized operation order: %d total (%d remap, %d add, %d update, %d link, %d remove)"),
 		OutOptimizedOperations.Num(), RemapOps.Num(), AddOps.Num(), UpdateOps.Num(), LinkOps.Num(), RemoveOps.Num());
+}
+
+void FMergePlanner::DetectFunctionLevelConflicts(
+	const TArray<FMergeConflict>& InputConflicts,
+	const FDiffResult& DiffResult,
+	TArray<FMergeConflict>& OutProcessedConflicts)
+{
+	// Group Node conflicts by GraphName
+	TMap<FString, TArray<const FMergeConflict*>> NodeConflictsByGraph;
+	TSet<FString> ProcessedGraphs; // Track graphs that have been converted to function-level conflicts
+	
+	for (const FMergeConflict& Conflict : InputConflicts)
+	{
+		// Only process Node conflicts (not NodeMove, as those are low severity)
+		if (Conflict.ConflictType == TEXT("Node") && !Conflict.GraphName.IsEmpty())
+		{
+			// Check if this graph is a function (not EventGraph or ConstructionScript)
+			FString GraphName = Conflict.GraphName;
+			if (!GraphName.Contains(TEXT("EventGraph")) && 
+				!GraphName.Contains(TEXT("ConstructionScript")) &&
+				!GraphName.IsEmpty())
+			{
+				// This is likely a function graph
+				if (!NodeConflictsByGraph.Contains(GraphName))
+				{
+					NodeConflictsByGraph.Add(GraphName, TArray<const FMergeConflict*>());
+				}
+				NodeConflictsByGraph[GraphName].Add(&Conflict);
+			}
+		}
+	}
+	
+	// Process each graph with multiple node conflicts
+	for (const auto& GraphConflicts : NodeConflictsByGraph)
+	{
+		const FString& GraphName = GraphConflicts.Key;
+		const TArray<const FMergeConflict*>& Conflicts = GraphConflicts.Value;
+		
+		// Only create function-level conflict if there are multiple node conflicts
+		// This indicates the function exists in both local and remote with internal conflicts
+		if (Conflicts.Num() > 1)
+		{
+			UE_LOG(LogTemp, Log, TEXT("DetectFunctionLevelConflicts: Found %d node conflicts in function '%s', creating function-level conflict"), 
+				Conflicts.Num(), *GraphName);
+			
+			// Mark this graph as processed
+			ProcessedGraphs.Add(GraphName);
+			
+			// Find the remote graph data from the diff result operations or conflicts
+			// We need to get the remote graph data to copy it over
+			FString RemoteGraphData;
+			
+			// First, look for Graph conflicts that might have the remote data
+			for (const FMergeConflict& Conflict : InputConflicts)
+			{
+				if (Conflict.ConflictType == TEXT("Graph") && Conflict.ElementName == GraphName)
+				{
+					RemoteGraphData = Conflict.RemoteData;
+					UE_LOG(LogTemp, Log, TEXT("DetectFunctionLevelConflicts: Found remote graph data in Graph conflict for '%s'"), *GraphName);
+					break;
+				}
+			}
+			
+			// If not found in conflicts, look for AddGraph operations
+			if (RemoteGraphData.IsEmpty())
+			{
+				for (const FMergeOperation& Op : DiffResult.Operations)
+				{
+					if (Op.OperationType == EMergeOperationType::AddGraph && 
+						(Op.TargetGraph == GraphName || Op.TargetId == GraphName))
+					{
+						FString GraphData = Op.AdditionalData.FindRef(TEXT("GraphData"));
+						if (!GraphData.IsEmpty())
+						{
+							RemoteGraphData = GraphData;
+							UE_LOG(LogTemp, Log, TEXT("DetectFunctionLevelConflicts: Found remote graph data in AddGraph operation for '%s'"), *GraphName);
+							break;
+						}
+					}
+				}
+			}
+			
+			// If still not found, we'll need to get it from the remote snapshot
+			// For now, log a warning - the resolution will need to handle this case
+			if (RemoteGraphData.IsEmpty())
+			{
+				UE_LOG(LogTemp, Warning, TEXT("DetectFunctionLevelConflicts: Could not find remote graph data for function '%s'. Manual resolution may be required."), *GraphName);
+			}
+			
+			// Create a FunctionWithInternalConflicts conflict
+			FMergeConflict FunctionConflict;
+			FunctionConflict.ConflictId = FGuid::NewGuid().ToString();
+			FunctionConflict.ConflictType = TEXT("FunctionWithInternalConflicts");
+			FunctionConflict.ElementName = GraphName;
+			FunctionConflict.GraphName = GraphName;
+			FunctionConflict.BaseValue = TEXT("Function exists in base");
+			FunctionConflict.LocalValue = FString::Printf(TEXT("Function with %d conflicting nodes"), Conflicts.Num());
+			FunctionConflict.RemoteValue = FString::Printf(TEXT("Function with %d conflicting nodes"), Conflicts.Num());
+			FunctionConflict.Severity = EConflictSeverity::High; // Function-level conflicts are high severity
+			FunctionConflict.DifferingFields.Add(TEXT("InternalNodes"));
+			FunctionConflict.RemoteData = RemoteGraphData; // Store remote graph data for copying
+			
+			// Store information about which node conflicts are part of this function conflict
+			FString NodeConflictIds;
+			for (int32 i = 0; i < Conflicts.Num(); i++)
+			{
+				if (i > 0) NodeConflictIds += TEXT(",");
+				NodeConflictIds += Conflicts[i]->ConflictId;
+			}
+			// We'll use LocalData to store the node conflict IDs for reference
+			FunctionConflict.LocalData = NodeConflictIds;
+			
+			OutProcessedConflicts.Add(FunctionConflict);
+		}
+	}
+	
+	// Add all other conflicts that weren't part of function-level conflicts
+	for (const FMergeConflict& Conflict : InputConflicts)
+	{
+		// Skip Node conflicts that are part of a function-level conflict
+		if (Conflict.ConflictType == TEXT("Node") && 
+			!Conflict.GraphName.IsEmpty() && 
+			ProcessedGraphs.Contains(Conflict.GraphName))
+		{
+			continue; // Skip this conflict, it's been replaced by a function-level conflict
+		}
+		
+		// Add all other conflicts
+		OutProcessedConflicts.Add(Conflict);
+	}
+	
+	UE_LOG(LogTemp, Log, TEXT("DetectFunctionLevelConflicts: Processed %d conflicts, output %d conflicts (%d function-level conflicts created)"), 
+		InputConflicts.Num(), OutProcessedConflicts.Num(), ProcessedGraphs.Num());
 }
 
 FString FMergePlanner::GeneratePlanSummary(const FMergePlan& MergePlan)

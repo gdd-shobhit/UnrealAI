@@ -808,6 +808,7 @@ void FDiffEngine::DiffNodes(
 						RemoteNodeData // Pass actual data
 					);
 					Conflict.Severity = AnalyzeConflictSeverity(TEXT("Node"), DifferingFields);
+					Conflict.GraphName = GraphName; // Store graph name for function-level conflict detection
 					OutConflicts.Add(Conflict);
 				}
 			}
@@ -862,6 +863,7 @@ void FDiffEngine::DiffNodes(
 							LocalRemoteDiffs
 						);
 						Conflict.Severity = EConflictSeverity::Low; // Move conflicts are low severity
+						Conflict.GraphName = GraphName; // Store graph name for function-level conflict detection
 						OutConflicts.Add(Conflict);
 					}
 					else
@@ -876,6 +878,7 @@ void FDiffEngine::DiffNodes(
 							LocalRemoteDiffs
 						);
 						Conflict.Severity = AnalyzeConflictSeverity(TEXT("Node"), LocalRemoteDiffs);
+						Conflict.GraphName = GraphName; // Store graph name for function-level conflict detection
 						OutConflicts.Add(Conflict);
 					}
 				}

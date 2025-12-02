@@ -342,6 +342,13 @@ bool FApplyEngine::ApplyOperation(
 				FName NewFuncName = !FunctionName.IsEmpty() ? FName(*FunctionName) : FName(*GraphName);
 				UEdGraph* NewGraph = nullptr;
 				
+				// Check if this is a conflicted function that needs to be copied over
+				FString ConflictResolution = Operation.AdditionalData.FindRef(TEXT("ConflictResolution"));
+				FString MarkAsConflicted = Operation.AdditionalData.FindRef(TEXT("MarkAsConflicted"));
+				FString PreserveGuids = Operation.AdditionalData.FindRef(TEXT("PreserveGuids"));
+				
+				bool bIsConflictedFunction = (ConflictResolution == TEXT("CopyFunctionWithConflicts") && MarkAsConflicted == TEXT("true"));
+				
 				// Check if this is a "KeepBoth" operation - if so, we need to create a new function with a different name
 				FString KeepBoth = Operation.AdditionalData.FindRef(TEXT("KeepBoth"));
 				if (KeepBoth == TEXT("true"))
@@ -351,6 +358,35 @@ bool FApplyEngine::ApplyOperation(
 					FString NewName = OriginalName + TEXT("_Remote");
 					NewFuncName = FName(*NewName);
 					UE_LOG(LogTemp, Log, TEXT("AddGraph: KeepBoth operation - creating function with modified name: %s (original: %s)"), *NewName, *OriginalName);
+				}
+				else if (bIsConflictedFunction)
+				{
+					// For conflicted functions, we need to replace the existing function with the remote version
+					UE_LOG(LogTemp, Log, TEXT("AddGraph: Conflicted function operation - replacing function '%s' with remote version"), *NewFuncName.ToString());
+					
+					// Find the existing function graph
+					UEdGraph* ExistingGraph = nullptr;
+					for (UEdGraph* Graph : TargetBlueprint->FunctionGraphs)
+					{
+						if (Graph && Graph->GetFName() == NewFuncName)
+						{
+							ExistingGraph = Graph;
+							break;
+						}
+					}
+					
+					if (ExistingGraph)
+					{
+						// Remove all nodes from the existing graph to prepare for replacement
+						// We'll preserve the graph itself and just replace its contents
+						UE_LOG(LogTemp, Log, TEXT("AddGraph: Found existing function graph '%s', will replace contents"), *NewFuncName.ToString());
+						// The graph will be reused, we just need to clear it and rebuild from remote data
+						// This is handled below when we create nodes from the remote data
+					}
+					else
+					{
+						UE_LOG(LogTemp, Warning, TEXT("AddGraph: Conflicted function '%s' not found locally, will create new"), *NewFuncName.ToString());
+					}
 				}
 				else
 				{
@@ -552,21 +588,45 @@ bool FApplyEngine::ApplyOperation(
 					}
 				}
 
-				// Create a new function graph
-				NewGraph = FBlueprintEditorUtils::CreateNewGraph(
-					TargetBlueprint,
-					NewFuncName,
-					UEdGraph::StaticClass(),
-					UEdGraphSchema_K2::StaticClass()
-				);
-				if (!NewGraph)
+				// For conflicted functions, reuse existing graph if it exists
+				if (bIsConflictedFunction && ExistingGraph)
 				{
-					OutError = TEXT("Failed to create function graph");
-					return false;
+					NewGraph = ExistingGraph;
+					UE_LOG(LogTemp, Log, TEXT("AddGraph: Reusing existing graph for conflicted function '%s'"), *NewFuncName.ToString());
+					
+					// Clear existing nodes (except function entry/result nodes which will be updated)
+					TArray<UEdGraphNode*> NodesToRemove;
+					for (UEdGraphNode* Node : NewGraph->Nodes)
+					{
+						if (Node && !Cast<UK2Node_FunctionEntry>(Node) && !Cast<UK2Node_FunctionResult>(Node))
+						{
+							NodesToRemove.Add(Node);
+						}
+					}
+					for (UEdGraphNode* Node : NodesToRemove)
+					{
+						NewGraph->RemoveNode(Node);
+					}
+					UE_LOG(LogTemp, Log, TEXT("AddGraph: Cleared %d nodes from existing graph"), NodesToRemove.Num());
 				}
-				
-				// Add the function graph with proper signature
-				FBlueprintEditorUtils::AddFunctionGraph<UClass>(TargetBlueprint, NewGraph, /*bIsUserCreated=*/ true, nullptr);
+				else
+				{
+					// Create a new function graph
+					NewGraph = FBlueprintEditorUtils::CreateNewGraph(
+						TargetBlueprint,
+						NewFuncName,
+						UEdGraph::StaticClass(),
+						UEdGraphSchema_K2::StaticClass()
+					);
+					if (!NewGraph)
+					{
+						OutError = TEXT("Failed to create function graph");
+						return false;
+					}
+					
+					// Add the function graph with proper signature
+					FBlueprintEditorUtils::AddFunctionGraph<UClass>(TargetBlueprint, NewGraph, /*bIsUserCreated=*/ true, nullptr);
+				}
 				
 				// Set up function signature with input/output parameters
 				if (UK2Node_FunctionEntry* EntryNode = Cast<UK2Node_FunctionEntry>(NewGraph->Nodes[0]))

@@ -334,6 +334,19 @@ private:
 	 */
 	static FString GeneratePlanSummary(const FMergePlan& MergePlan);
 
+	/**
+	 * Detect function-level conflicts: when multiple node conflicts exist within the same function,
+	 * replace them with a single FunctionWithInternalConflicts conflict
+	 * @param InputConflicts Input conflicts to process
+	 * @param DiffResult The diff result containing graph information
+	 * @param OutProcessedConflicts Output conflicts with function-level conflicts detected
+	 */
+	static void DetectFunctionLevelConflicts(
+		const TArray<FMergeConflict>& InputConflicts,
+		const FDiffResult& DiffResult,
+		TArray<FMergeConflict>& OutProcessedConflicts
+	);
+
 private:
 	static TSharedPtr<ILLMAdapter> CurrentLLMAdapter;
 };

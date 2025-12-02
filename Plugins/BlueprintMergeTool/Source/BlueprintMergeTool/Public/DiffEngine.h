@@ -142,6 +142,10 @@ struct BLUEPRINTMERGETOOL_API FMergeConflict
 	UPROPERTY()
 	FString RemoteData; // JSON data for remote version (for nodes/graphs)
 
+	// Graph name for conflicts within graphs (nodes, connections)
+	UPROPERTY()
+	FString GraphName;
+
 	FMergeConflict()
 		: Severity(EConflictSeverity::Medium)
 	{

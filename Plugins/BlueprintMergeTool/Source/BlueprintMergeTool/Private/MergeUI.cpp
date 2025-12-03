@@ -1,4 +1,5 @@
 #include "../Public/MergeUI.h"
+#include "../Public/PerforceAdapter.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
@@ -22,6 +23,7 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Engine/Blueprint.h"
 #include "HAL/PlatformProcess.h"
+#include "Widgets/Input/STextComboBox.h"
 
 void SMergeUI::Construct(const FArguments& InArgs)
 {
@@ -39,6 +41,10 @@ void SMergeUI::Construct(const FArguments& InArgs)
 	bDiffPerformed = false;
 	bMergePlanCreated = false;
 	bHasUnresolvedConflicts = false;
+	
+	// Initialize Perforce state
+	ConflictedBlueprints.Empty();
+	SelectedConflictedBlueprint.Empty();
 
 	// Initialize merge config with sensible defaults
 	MergeConfig.DefaultStrategy = EResolutionStrategy::NonDestructive;
@@ -89,6 +95,20 @@ void SMergeUI::Construct(const FArguments& InArgs)
 		[
 			SNew(SScrollBox)
 			
+			// Perforce Integration Section (if available)
+			+ SScrollBox::Slot()
+			.Padding(0, 0, 0, 20)
+			[
+				CreatePerforceSection()
+			]
+
+			// Separator
+			+ SScrollBox::Slot()
+			.Padding(0, 0, 0, 20)
+			[
+				SNew(SSeparator)
+			]
+
 			// File Selection Section
 			+ SScrollBox::Slot()
 			.Padding(0, 0, 0, 20)
@@ -322,6 +342,160 @@ TSharedRef<SWidget> SMergeUI::CreateFileSelectionSection()
 				SNew(SButton)
 				.Text(FText::FromString(TEXT("🗑️ Clear All")))
 				.OnClicked(this, &SMergeUI::OnClearAll)
+			]
+		];
+}
+
+TSharedRef<SWidget> SMergeUI::CreatePerforceSection()
+{
+	return SNew(SVerticalBox)
+		
+		// Section Title
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 0, 0, 15)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("🔧 Perforce Integration")))
+			.Font(FCoreStyle::GetDefaultFontStyle("Bold", 16))
+		]
+
+		// Perforce status
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 0, 0, 10)
+		[
+			SNew(STextBlock)
+			.Text_Lambda([this]() -> FText
+			{
+				if (FPerforceAdapter::IsPerforceAvailable())
+				{
+					return FText::FromString(TEXT("✓ Perforce is available"));
+				}
+				else
+				{
+					return FText::FromString(TEXT("⚠ Perforce is not configured. Manual Blueprint selection is still available below."));
+				}
+			})
+			.Font(FCoreStyle::GetDefaultFontStyle("Normal", 10))
+			.ColorAndOpacity_Lambda([this]() -> FSlateColor
+			{
+				if (FPerforceAdapter::IsPerforceAvailable())
+				{
+					return FSlateColor(FLinearColor(0.2f, 0.8f, 0.4f, 1.0f));
+				}
+				else
+				{
+					return FSlateColor(FLinearColor(0.8f, 0.6f, 0.2f, 1.0f));
+				}
+			})
+		]
+
+		// Perforce buttons (only shown if Perforce is available)
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 0, 0, 10)
+		.Visibility_Lambda([this]() -> EVisibility
+		{
+			return FPerforceAdapter::IsPerforceAvailable() ? EVisibility::Visible : EVisibility::Collapsed;
+		})
+		[
+			SNew(SHorizontalBox)
+
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.Padding(0, 0, 10, 0)
+			[
+				SNew(SButton)
+				.Text(FText::FromString(TEXT("🔍 Detect Conflicts")))
+				.ToolTipText(FText::FromString(TEXT("Scan for Blueprints with Perforce conflicts")))
+				.OnClicked(this, &SMergeUI::OnDetectPerforceConflicts)
+			]
+
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.Padding(0, 0, 10, 0)
+			[
+				SNew(SButton)
+				.Text(FText::FromString(TEXT("📥 Load from Perforce")))
+				.ToolTipText(FText::FromString(TEXT("Load BASE, LOCAL, and REMOTE versions for selected conflicted Blueprint")))
+				.OnClicked(this, &SMergeUI::OnLoadFromPerforce)
+				.IsEnabled_Lambda([this]() -> bool
+				{
+					return !SelectedConflictedBlueprint.IsEmpty();
+				})
+			]
+		]
+
+		// Selected conflicted Blueprint display
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 10, 0, 0)
+		.Visibility_Lambda([this]() -> EVisibility
+		{
+			return (!SelectedConflictedBlueprint.IsEmpty() && FPerforceAdapter::IsPerforceAvailable()) ? EVisibility::Visible : EVisibility::Collapsed;
+		})
+		[
+			SNew(SBorder)
+			.BorderBackgroundColor(FLinearColor(0.2f, 0.4f, 0.2f, 1.0f))
+			.Padding(10)
+			[
+				SNew(STextBlock)
+				.Text_Lambda([this]() -> FText
+				{
+					return FText::FromString(FString::Printf(TEXT("Selected Blueprint: %s"), *SelectedConflictedBlueprint));
+				})
+				.Font(FCoreStyle::GetDefaultFontStyle("Normal", 10))
+				.AutoWrapText(true)
+			]
+		]
+
+		// Conflict count display
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 10, 0, 0)
+		.Visibility_Lambda([this]() -> EVisibility
+		{
+			return (ConflictedBlueprints.Num() > 0 && FPerforceAdapter::IsPerforceAvailable()) ? EVisibility::Visible : EVisibility::Collapsed;
+		})
+		[
+			SNew(STextBlock)
+			.Text_Lambda([this]() -> FText
+			{
+				return FText::FromString(FString::Printf(TEXT("Conflicts detected: %d Blueprint(s)"), ConflictedBlueprints.Num()));
+			})
+			.Font(FCoreStyle::GetDefaultFontStyle("Normal", 10))
+			.ColorAndOpacity(FLinearColor(0.8f, 0.6f, 0.2f, 1.0f))
+		]
+
+		// Post-merge Perforce actions (only shown after merge is applied)
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 10, 0, 0)
+		.Visibility_Lambda([this]() -> EVisibility
+		{
+			return (bMergePlanCreated && !bHasUnresolvedConflicts && FPerforceAdapter::IsPerforceAvailable() && !SelectedConflictedBlueprint.IsEmpty()) ? EVisibility::Visible : EVisibility::Collapsed;
+		})
+		[
+			SNew(SHorizontalBox)
+
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.Padding(0, 0, 10, 0)
+			[
+				SNew(SButton)
+				.Text(FText::FromString(TEXT("✅ Resolve in Perforce")))
+				.ToolTipText(FText::FromString(TEXT("Mark the conflict as resolved in Perforce (accept merge)")))
+				.OnClicked(this, &SMergeUI::OnResolveInPerforce)
+			]
+
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			[
+				SNew(SButton)
+				.Text(FText::FromString(TEXT("📤 Submit to Perforce")))
+				.ToolTipText(FText::FromString(TEXT("Submit the merged Blueprint to Perforce")))
+				.OnClicked(this, &SMergeUI::OnSubmitToPerforce)
 			]
 		];
 }
@@ -1337,5 +1511,253 @@ FReply SMergeUI::OnResolveConflict(int32 ConflictIndex, const FString& Resolutio
 {
 	// TODO: Implement individual conflict resolution
 	FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(TEXT("Individual conflict resolution will be implemented in a future version.")));
+	return FReply::Handled();
+}
+
+FReply SMergeUI::OnDetectPerforceConflicts()
+{
+	if (!FPerforceAdapter::IsPerforceAvailable())
+	{
+		FMessageDialog::Open(EAppMsgType::Ok, 
+			FText::FromString(TEXT("Perforce is not configured. Please set up Perforce in Editor Preferences → Source Control.")));
+		return FReply::Handled();
+	}
+
+	*StatusMessage = TEXT("Scanning for conflicted Blueprints...");
+	
+	ConflictedBlueprints.Empty();
+	int32 ConflictCount = FPerforceAdapter::DetectConflictedBlueprints(ConflictedBlueprints);
+
+	if (ConflictCount > 0)
+	{
+		*StatusMessage = FString::Printf(TEXT("Found %d conflicted Blueprint(s)"), ConflictCount);
+		
+		// Show dialog to select a conflicted Blueprint
+		FString SelectedBlueprint;
+		bool bBlueprintSelected = false;
+		
+		// Create a dialog window for selecting conflicted Blueprint
+		TSharedRef<SWindow> ConflictPickerWindow = SNew(SWindow)
+			.Title(FText::FromString(TEXT("Select Conflicted Blueprint")))
+			.ClientSize(FVector2D(600, 400))
+			.SupportsMaximize(false)
+			.SupportsMinimize(false);
+
+		TSharedRef<SVerticalBox> ConflictListBox = SNew(SVerticalBox);
+		
+		for (const FString& BlueprintPath : ConflictedBlueprints)
+		{
+			ConflictListBox->AddSlot()
+				.AutoHeight()
+				.Padding(2)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(BlueprintPath))
+					.HAlign(HAlign_Left)
+					.OnClicked_Lambda([&SelectedBlueprint, &bBlueprintSelected, BlueprintPath, ConflictPickerWindow]() -> FReply
+					{
+						SelectedBlueprint = BlueprintPath;
+						bBlueprintSelected = true;
+						ConflictPickerWindow->RequestDestroyWindow();
+						return FReply::Handled();
+					})
+				];
+		}
+		
+		TSharedRef<SWidget> ConflictPickerContent = SNew(SVerticalBox)
+			+ SVerticalBox::Slot()
+			.FillHeight(1.0f)
+			.Padding(10)
+			[
+				SNew(SBorder)
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+				.Padding(5)
+				[
+					SNew(SScrollBox)
+					+ SScrollBox::Slot()
+					[
+						ConflictListBox
+					]
+				]
+			]
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(10)
+			[
+				SNew(SButton)
+				.Text(FText::FromString(TEXT("Cancel")))
+				.HAlign(HAlign_Center)
+				.OnClicked_Lambda([ConflictPickerWindow]() -> FReply
+				{
+					ConflictPickerWindow->RequestDestroyWindow();
+					return FReply::Handled();
+				})
+			];
+
+		ConflictPickerWindow->SetContent(ConflictPickerContent);
+		FSlateApplication::Get().AddModalWindow(ConflictPickerWindow, nullptr);
+
+		if (bBlueprintSelected && !SelectedBlueprint.IsEmpty())
+		{
+			OnConflictedBlueprintSelected(SelectedBlueprint);
+		}
+		
+		UE_LOG(LogTemp, Log, TEXT("Found %d conflicted Blueprints"), ConflictCount);
+	}
+	else
+	{
+		*StatusMessage = TEXT("No conflicted Blueprints found");
+		FMessageDialog::Open(EAppMsgType::Ok, 
+			FText::FromString(TEXT("No conflicted Blueprints found. You can still use manual Blueprint selection below.")));
+	}
+
+	return FReply::Handled();
+}
+
+FReply SMergeUI::OnLoadFromPerforce()
+{
+	if (SelectedConflictedBlueprint.IsEmpty())
+	{
+		FMessageDialog::Open(EAppMsgType::Ok, 
+			FText::FromString(TEXT("Please select a conflicted Blueprint first by clicking 'Detect Conflicts' and selecting one from the list.")));
+		return FReply::Handled();
+	}
+
+	*StatusMessage = TEXT("Loading Blueprint versions from Perforce...");
+
+	UBlueprint* BaseBP = nullptr;
+	UBlueprint* LocalBP = nullptr;
+	UBlueprint* RemoteBP = nullptr;
+	TSharedPtr<FJsonObject> BaseSnap, LocalSnap, RemoteSnap;
+	FString Error;
+
+	if (FPerforceAdapter::LoadAllVersions(SelectedConflictedBlueprint, BaseBP, LocalBP, RemoteBP, BaseSnap, LocalSnap, RemoteSnap, Error))
+	{
+		// Clear existing references
+		ClearAllBlueprintReferences();
+
+		// Set new references
+		BaseBlueprint = BaseBP;
+		LocalBlueprint = LocalBP;
+		RemoteBlueprint = RemoteBP;
+		
+		BaseSnapshot = BaseSnap;
+		LocalSnapshot = LocalSnap;
+		RemoteSnapshot = RemoteSnap;
+
+		// Update UI text
+		*BasePathText = FString::Printf(TEXT("Base: %s (from Perforce)"), *GetBlueprintDisplayName(BaseBP));
+		*LocalPathText = FString::Printf(TEXT("Local: %s (from Perforce)"), *GetBlueprintDisplayName(LocalBP));
+		*RemotePathText = FString::Printf(TEXT("Remote: %s (from Perforce)"), *GetBlueprintDisplayName(RemoteBP));
+
+		*StatusMessage = TEXT("Successfully loaded all versions from Perforce. Click 'Perform Diff' to continue.");
+		
+		UE_LOG(LogTemp, Log, TEXT("Successfully loaded all versions from Perforce for: %s"), *SelectedConflictedBlueprint);
+	}
+	else
+	{
+		*StatusMessage = FString::Printf(TEXT("Failed to load versions: %s"), *Error);
+		FMessageDialog::Open(EAppMsgType::Ok, 
+			FText::FromString(FString::Printf(TEXT("Failed to load Blueprint versions from Perforce:\n\n%s"), *Error)));
+	}
+
+	return FReply::Handled();
+}
+
+void SMergeUI::OnConflictedBlueprintSelected(FString BlueprintPath)
+{
+	SelectedConflictedBlueprint = BlueprintPath;
+	*StatusMessage = FString::Printf(TEXT("Selected: %s - Click 'Load from Perforce' to load versions"), *BlueprintPath);
+	UE_LOG(LogTemp, Log, TEXT("Selected conflicted Blueprint: %s"), *BlueprintPath);
+}
+
+FReply SMergeUI::OnResolveInPerforce()
+{
+	if (SelectedConflictedBlueprint.IsEmpty())
+	{
+		FMessageDialog::Open(EAppMsgType::Ok, 
+			FText::FromString(TEXT("No Blueprint selected. Please load a Blueprint from Perforce first.")));
+		return FReply::Handled();
+	}
+
+	FString FilePath = FPerforceAdapter::AssetPathToFilePath(SelectedConflictedBlueprint);
+	if (FilePath.IsEmpty())
+	{
+		FMessageDialog::Open(EAppMsgType::Ok, 
+			FText::FromString(TEXT("Could not convert asset path to file path.")));
+		return FReply::Handled();
+	}
+
+	FString Error;
+	if (FPerforceAdapter::ResolveConflict(FilePath, EPerforceResolveMethod::AcceptMerge, Error))
+	{
+		*StatusMessage = TEXT("Conflict resolved in Perforce successfully!");
+		FMessageDialog::Open(EAppMsgType::Ok, 
+			FText::FromString(TEXT("Conflict has been marked as resolved in Perforce. You can now submit your changes.")));
+		
+		UE_LOG(LogTemp, Log, TEXT("Resolved conflict in Perforce for: %s"), *SelectedConflictedBlueprint);
+	}
+	else
+	{
+		*StatusMessage = FString::Printf(TEXT("Failed to resolve: %s"), *Error);
+		FMessageDialog::Open(EAppMsgType::Ok, 
+			FText::FromString(FString::Printf(TEXT("Failed to resolve conflict in Perforce:\n\n%s"), *Error)));
+	}
+
+	return FReply::Handled();
+}
+
+FReply SMergeUI::OnSubmitToPerforce()
+{
+	if (SelectedConflictedBlueprint.IsEmpty())
+	{
+		FMessageDialog::Open(EAppMsgType::Ok, 
+			FText::FromString(TEXT("No Blueprint selected. Please load a Blueprint from Perforce first.")));
+		return FReply::Handled();
+	}
+
+	FString FilePath = FPerforceAdapter::AssetPathToFilePath(SelectedConflictedBlueprint);
+	if (FilePath.IsEmpty())
+	{
+		FMessageDialog::Open(EAppMsgType::Ok, 
+			FText::FromString(TEXT("Could not convert asset path to file path.")));
+		return FReply::Handled();
+	}
+
+	// Save the Blueprint before submitting
+	if (LocalBlueprint.IsValid())
+	{
+		UPackage* Package = LocalBlueprint->GetOutermost();
+		if (Package)
+		{
+			FString PackageName = Package->GetName();
+			UPackage::SavePackage(Package, nullptr, RF_Standalone, *FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetAssetPackageExtension()));
+		}
+	}
+
+	TArray<FString> FilesToSubmit;
+	FilesToSubmit.Add(FilePath);
+
+	FString Description = FString::Printf(TEXT("Resolved merge conflicts for %s using Blueprint Merge Tool"), *SelectedConflictedBlueprint);
+	
+	FString Error;
+	if (FPerforceAdapter::SubmitFiles(FilesToSubmit, Description, Error))
+	{
+		*StatusMessage = TEXT("Blueprint submitted to Perforce successfully!");
+		FMessageDialog::Open(EAppMsgType::Ok, 
+			FText::FromString(TEXT("Blueprint has been submitted to Perforce successfully!")));
+		
+		// Clear the selection after successful submit
+		SelectedConflictedBlueprint.Empty();
+		
+		UE_LOG(LogTemp, Log, TEXT("Submitted to Perforce: %s"), *SelectedConflictedBlueprint);
+	}
+	else
+	{
+		*StatusMessage = FString::Printf(TEXT("Failed to submit: %s"), *Error);
+		FMessageDialog::Open(EAppMsgType::Ok, 
+			FText::FromString(FString::Printf(TEXT("Failed to submit to Perforce:\n\n%s"), *Error)));
+	}
+
 	return FReply::Handled();
 }

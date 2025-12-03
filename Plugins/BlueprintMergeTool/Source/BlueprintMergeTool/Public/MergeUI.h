@@ -9,6 +9,7 @@
 #include "ApplyEngine.h"
 #include "SnapshotManager.h"
 #include "Engine/Blueprint.h"
+#include "PerforceAdapter.h"
 
 /**
  * Main UI widget for Blueprint merging operations
@@ -17,6 +18,7 @@
  * - Showing conflicts and preview
  * - Manual conflict resolution
  * - Applying merge operations
+ * - Perforce integration
  */
 class BLUEPRINTMERGETOOL_API SMergeUI : public SCompoundWidget
 {
@@ -29,6 +31,7 @@ public:
 private:
 	// File selection
 	TSharedRef<SWidget> CreateFileSelectionSection();
+	TSharedRef<SWidget> CreatePerforceSection();
 	TSharedRef<SWidget> CreateConflictResolutionSection();
 	TSharedRef<SWidget> CreatePreviewSection();
 	TSharedRef<SWidget> CreateActionButtonsSection();
@@ -43,6 +46,13 @@ private:
 	FReply OnClearAll();
 	FReply OnExportSnapshots();
 	FReply OnImportSnapshots();
+
+	// Perforce integration handlers
+	FReply OnDetectPerforceConflicts();
+	FReply OnLoadFromPerforce();
+	FReply OnResolveInPerforce();
+	FReply OnSubmitToPerforce();
+	void OnConflictedBlueprintSelected(FString BlueprintPath);
 
 	// Conflict resolution
 	FReply OnResolveConflict(int32 ConflictIndex, const FString& Resolution);
@@ -99,4 +109,8 @@ private:
 	bool bDiffPerformed;
 	bool bMergePlanCreated;
 	bool bHasUnresolvedConflicts;
+
+	// Perforce integration state
+	TArray<FString> ConflictedBlueprints;
+	FString SelectedConflictedBlueprint;
 };

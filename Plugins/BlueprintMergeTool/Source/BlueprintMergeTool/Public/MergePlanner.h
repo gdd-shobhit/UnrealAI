@@ -340,11 +340,13 @@ private:
 	 * @param InputConflicts Input conflicts to process
 	 * @param DiffResult The diff result containing graph information
 	 * @param OutProcessedConflicts Output conflicts with function-level conflicts detected
+	 * @param OutFunctionsWithConflicts Output set of function names that have function-level conflicts
 	 */
 	static void DetectFunctionLevelConflicts(
 		const TArray<FMergeConflict>& InputConflicts,
 		const FDiffResult& DiffResult,
-		TArray<FMergeConflict>& OutProcessedConflicts
+		TArray<FMergeConflict>& OutProcessedConflicts,
+		TSet<FString>& OutFunctionsWithConflicts
 	);
 
 private:

@@ -24,6 +24,7 @@
 #include "Engine/Blueprint.h"
 #include "HAL/PlatformProcess.h"
 #include "Widgets/Input/STextComboBox.h"
+#include "UObject/SavePackage.h"
 
 void SMergeUI::Construct(const FArguments& InArgs)
 {
@@ -395,12 +396,11 @@ TSharedRef<SWidget> SMergeUI::CreatePerforceSection()
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0, 0, 0, 10)
-		.Visibility_Lambda([this]() -> EVisibility
-		{
-			return FPerforceAdapter::IsPerforceAvailable() ? EVisibility::Visible : EVisibility::Collapsed;
-		})
 		[
-			SNew(SHorizontalBox)
+			SNew(SBox)
+			.Visibility_Lambda([this]() { return GetPerforceSectionVisibility(); })
+			[
+				SNew(SHorizontalBox)
 
 			+ SHorizontalBox::Slot()
 			.AutoWidth()
@@ -425,18 +425,18 @@ TSharedRef<SWidget> SMergeUI::CreatePerforceSection()
 					return !SelectedConflictedBlueprint.IsEmpty();
 				})
 			]
+			]
 		]
 
 		// Selected conflicted Blueprint display
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0, 10, 0, 0)
-		.Visibility_Lambda([this]() -> EVisibility
-		{
-			return (!SelectedConflictedBlueprint.IsEmpty() && FPerforceAdapter::IsPerforceAvailable()) ? EVisibility::Visible : EVisibility::Collapsed;
-		})
 		[
-			SNew(SBorder)
+			SNew(SBox)
+			.Visibility_Lambda([this]() { return GetSelectedBlueprintVisibility(); })
+			[
+				SNew(SBorder)
 			.BorderBackgroundColor(FLinearColor(0.2f, 0.4f, 0.2f, 1.0f))
 			.Padding(10)
 			[
@@ -448,36 +448,36 @@ TSharedRef<SWidget> SMergeUI::CreatePerforceSection()
 				.Font(FCoreStyle::GetDefaultFontStyle("Normal", 10))
 				.AutoWrapText(true)
 			]
+			]
 		]
 
 		// Conflict count display
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0, 10, 0, 0)
-		.Visibility_Lambda([this]() -> EVisibility
-		{
-			return (ConflictedBlueprints.Num() > 0 && FPerforceAdapter::IsPerforceAvailable()) ? EVisibility::Visible : EVisibility::Collapsed;
-		})
 		[
-			SNew(STextBlock)
+			SNew(SBox)
+			.Visibility_Lambda([this]() { return GetConflictCountVisibility(); })
+			[
+				SNew(STextBlock)
 			.Text_Lambda([this]() -> FText
 			{
 				return FText::FromString(FString::Printf(TEXT("Conflicts detected: %d Blueprint(s)"), ConflictedBlueprints.Num()));
 			})
 			.Font(FCoreStyle::GetDefaultFontStyle("Normal", 10))
 			.ColorAndOpacity(FLinearColor(0.8f, 0.6f, 0.2f, 1.0f))
+			]
 		]
 
 		// Post-merge Perforce actions (only shown after merge is applied)
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0, 10, 0, 0)
-		.Visibility_Lambda([this]() -> EVisibility
-		{
-			return (bMergePlanCreated && !bHasUnresolvedConflicts && FPerforceAdapter::IsPerforceAvailable() && !SelectedConflictedBlueprint.IsEmpty()) ? EVisibility::Visible : EVisibility::Collapsed;
-		})
 		[
-			SNew(SHorizontalBox)
+			SNew(SBox)
+			.Visibility_Lambda([this]() { return GetPostMergeActionsVisibility(); })
+			[
+				SNew(SHorizontalBox)
 
 			+ SHorizontalBox::Slot()
 			.AutoWidth()
@@ -496,6 +496,7 @@ TSharedRef<SWidget> SMergeUI::CreatePerforceSection()
 				.Text(FText::FromString(TEXT("📤 Submit to Perforce")))
 				.ToolTipText(FText::FromString(TEXT("Submit the merged Blueprint to Perforce")))
 				.OnClicked(this, &SMergeUI::OnSubmitToPerforce)
+			]
 			]
 		];
 }
@@ -1284,6 +1285,26 @@ FSlateColor SMergeUI::GetStatusColor() const
 	}
 }
 
+EVisibility SMergeUI::GetPerforceSectionVisibility() const
+{
+	return FPerforceAdapter::IsPerforceAvailable() ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+EVisibility SMergeUI::GetSelectedBlueprintVisibility() const
+{
+	return (!SelectedConflictedBlueprint.IsEmpty() && FPerforceAdapter::IsPerforceAvailable()) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+EVisibility SMergeUI::GetConflictCountVisibility() const
+{
+	return (ConflictedBlueprints.Num() > 0 && FPerforceAdapter::IsPerforceAvailable()) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+EVisibility SMergeUI::GetPostMergeActionsVisibility() const
+{
+	return (bMergePlanCreated && !bHasUnresolvedConflicts && FPerforceAdapter::IsPerforceAvailable() && !SelectedConflictedBlueprint.IsEmpty()) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
 bool SMergeUI::ShowBlueprintSelectionDialog(FString& OutSelectedPath)
 {
 	// Create a custom asset picker dialog
@@ -1731,7 +1752,10 @@ FReply SMergeUI::OnSubmitToPerforce()
 		if (Package)
 		{
 			FString PackageName = Package->GetName();
-			UPackage::SavePackage(Package, nullptr, RF_Standalone, *FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetAssetPackageExtension()));
+			FString Filename = FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetAssetPackageExtension());
+			FSavePackageArgs SaveArgs;
+			SaveArgs.SaveFlags = RF_Standalone;
+			UPackage::SavePackage(Package, nullptr, *Filename, SaveArgs);
 		}
 	}
 

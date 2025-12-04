@@ -5,6 +5,7 @@
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
+#include "EdGraphNode_Comment.h"
 #include "K2Node.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_VariableGet.h"
@@ -361,31 +362,45 @@ bool FApplyEngine::ApplyOperation(
 				}
 				else if (bIsConflictedFunction)
 				{
-					// For conflicted functions, we need to replace the existing function with the remote version
-					UE_LOG(LogTemp, Log, TEXT("AddGraph: Conflicted function operation - replacing function '%s' with remote version"), *NewFuncName.ToString());
+					// For conflicted functions, create a COPY with a renamed version (e.g., "conflict_FunctionName")
+					// This preserves the local function and adds the remote version as a separate copy
+					FString CreateCopyWithRename = Operation.AdditionalData.FindRef(TEXT("CreateCopyWithRename"));
+					FString RenameSuffix = Operation.AdditionalData.FindRef(TEXT("RenameSuffix"));
+					FString OriginalFunctionName = Operation.AdditionalData.FindRef(TEXT("OriginalFunctionName"));
 					
-					// Find the existing function graph
-					UEdGraph* ExistingGraph = nullptr;
-					for (UEdGraph* Graph : TargetBlueprint->FunctionGraphs)
+					if (CreateCopyWithRename == TEXT("true"))
 					{
-						if (Graph && Graph->GetFName() == NewFuncName)
+						// Create a renamed copy of the function to preserve both local and remote versions
+						FString OriginalName = !OriginalFunctionName.IsEmpty() ? OriginalFunctionName : NewFuncName.ToString();
+						FString Suffix = !RenameSuffix.IsEmpty() ? RenameSuffix : TEXT("_Conflict");
+						FString NewName = FString::Printf(TEXT("conflict_%s"), *OriginalName);
+						
+						NewFuncName = FName(*NewName);
+						UE_LOG(LogTemp, Log, TEXT("AddGraph: Conflicted function - creating renamed copy '%s' (original: '%s') to preserve local function"), 
+							*NewName, *OriginalName);
+						
+						// Check if the conflicted copy already exists
+						if (UFunction* Existing = TargetBlueprint->SkeletonGeneratedClass ? TargetBlueprint->SkeletonGeneratedClass->FindFunctionByName(NewFuncName) : nullptr)
 						{
-							ExistingGraph = Graph;
-							break;
+							UE_LOG(LogTemp, Log, TEXT("AddGraph: Conflicted copy '%s' already exists, will update it"), *NewName);
+							// Will continue to create/update the conflicted copy
 						}
-					}
-					
-					if (ExistingGraph)
-					{
-						// Remove all nodes from the existing graph to prepare for replacement
-						// We'll preserve the graph itself and just replace its contents
-						UE_LOG(LogTemp, Log, TEXT("AddGraph: Found existing function graph '%s', will replace contents"), *NewFuncName.ToString());
-						// The graph will be reused, we just need to clear it and rebuild from remote data
-						// This is handled below when we create nodes from the remote data
 					}
 					else
 					{
-						UE_LOG(LogTemp, Warning, TEXT("AddGraph: Conflicted function '%s' not found locally, will create new"), *NewFuncName.ToString());
+						// Fallback to old behavior (replace) if flag not set
+						UE_LOG(LogTemp, Warning, TEXT("AddGraph: Conflicted function operation without CreateCopyWithRename flag - using original function name '%s'"), *NewFuncName.ToString());
+						
+						// Check if function exists locally - if it does, we should still create a copy
+						UFunction* LocalFunction = TargetBlueprint->SkeletonGeneratedClass ? TargetBlueprint->SkeletonGeneratedClass->FindFunctionByName(NewFuncName) : nullptr;
+						if (LocalFunction)
+						{
+							// Function exists locally, so create a copy with renamed version
+							FString OriginalName = NewFuncName.ToString();
+							FString NewName = FString::Printf(TEXT("conflict_%s"), *OriginalName);
+							NewFuncName = FName(*NewName);
+							UE_LOG(LogTemp, Log, TEXT("AddGraph: Local function exists, creating conflicted copy '%s'"), *NewName);
+						}
 					}
 				}
 				else
@@ -588,44 +603,25 @@ bool FApplyEngine::ApplyOperation(
 					}
 				}
 
-				// For conflicted functions, reuse existing graph if it exists
-				if (bIsConflictedFunction && ExistingGraph)
+				// Create a new function graph (for conflicted functions, this creates a new copy)
+				NewGraph = FBlueprintEditorUtils::CreateNewGraph(
+					TargetBlueprint,
+					NewFuncName,
+					UEdGraph::StaticClass(),
+					UEdGraphSchema_K2::StaticClass()
+				);
+				if (!NewGraph)
 				{
-					NewGraph = ExistingGraph;
-					UE_LOG(LogTemp, Log, TEXT("AddGraph: Reusing existing graph for conflicted function '%s'"), *NewFuncName.ToString());
-					
-					// Clear existing nodes (except function entry/result nodes which will be updated)
-					TArray<UEdGraphNode*> NodesToRemove;
-					for (UEdGraphNode* Node : NewGraph->Nodes)
-					{
-						if (Node && !Cast<UK2Node_FunctionEntry>(Node) && !Cast<UK2Node_FunctionResult>(Node))
-						{
-							NodesToRemove.Add(Node);
-						}
-					}
-					for (UEdGraphNode* Node : NodesToRemove)
-					{
-						NewGraph->RemoveNode(Node);
-					}
-					UE_LOG(LogTemp, Log, TEXT("AddGraph: Cleared %d nodes from existing graph"), NodesToRemove.Num());
+					OutError = TEXT("Failed to create function graph");
+					return false;
 				}
-				else
+				
+				// Add the function graph with proper signature
+				FBlueprintEditorUtils::AddFunctionGraph<UClass>(TargetBlueprint, NewGraph, /*bIsUserCreated=*/ true, nullptr);
+				
+				if (bIsConflictedFunction)
 				{
-					// Create a new function graph
-					NewGraph = FBlueprintEditorUtils::CreateNewGraph(
-						TargetBlueprint,
-						NewFuncName,
-						UEdGraph::StaticClass(),
-						UEdGraphSchema_K2::StaticClass()
-					);
-					if (!NewGraph)
-					{
-						OutError = TEXT("Failed to create function graph");
-						return false;
-					}
-					
-					// Add the function graph with proper signature
-					FBlueprintEditorUtils::AddFunctionGraph<UClass>(TargetBlueprint, NewGraph, /*bIsUserCreated=*/ true, nullptr);
+					UE_LOG(LogTemp, Log, TEXT("AddGraph: Created new function graph '%s' as conflicted copy (local function preserved)"), *NewFuncName.ToString());
 				}
 				
 				// Set up function signature with input/output parameters
@@ -928,6 +924,79 @@ bool FApplyEngine::ApplyOperation(
 								UE_LOG(LogTemp, Warning, TEXT("AddGraph: Fallback cannot connect pins %s -> %s (incompatible)"), *SourcePinName, *TargetPinName);
 							}
 #endif
+						}
+					}
+				}
+
+				// For conflicted functions, add comment nodes marking conflict locations
+				if (bIsConflictedFunction)
+				{
+					FString ConflictNodeData = Operation.AdditionalData.FindRef(TEXT("ConflictNodeData"));
+					if (!ConflictNodeData.IsEmpty())
+					{
+						// Parse conflict node data: "ConflictId1:NodePosX1:NodePosY1:NodeTitle1|ConflictId2:..."
+						TArray<FString> ConflictEntries;
+						ConflictNodeData.ParseIntoArray(ConflictEntries, TEXT("|"), true);
+						
+						for (const FString& Entry : ConflictEntries)
+						{
+							TArray<FString> Parts;
+							Entry.ParseIntoArray(Parts, TEXT(":"), true);
+							
+							if (Parts.Num() >= 4)
+							{
+								FString ConflictId = Parts[0];
+								FString NodePosXStr = Parts[1];
+								FString NodePosYStr = Parts[2];
+								FString NodeTitle = Parts[3];
+								
+								// Parse position from stored data
+								double NodePosX = FCString::Atod(*NodePosXStr);
+								double NodePosY = FCString::Atod(*NodePosYStr);
+								
+								// If position is 0, try to find it from the graph data
+								if (NodePosX == 0.0 && NodePosY == 0.0 && NodesArray)
+								{
+									for (const TSharedPtr<FJsonValue>& NodeValue : *NodesArray)
+									{
+										if (NodeValue.IsValid() && NodeValue->Type == EJson::Object)
+										{
+											TSharedPtr<FJsonObject> NodeObj = NodeValue->AsObject();
+											FString NodeGuid = NodeObj->GetStringField(TEXT("NodeGuid"));
+											FString ObjNodeTitle = NodeObj->GetStringField(TEXT("NodeTitle"));
+											
+											// Match by GUID or title
+											if (NodeGuid == ConflictId || ObjNodeTitle == NodeTitle)
+											{
+												NodePosX = NodeObj->GetNumberField(TEXT("NodePosX"));
+												NodePosY = NodeObj->GetNumberField(TEXT("NodePosY"));
+												break;
+											}
+										}
+									}
+								}
+								
+								// Create a comment node at the conflict position
+								UEdGraphNode_Comment* CommentNode = NewObject<UEdGraphNode_Comment>(NewGraph, UEdGraphNode_Comment::StaticClass());
+								if (CommentNode)
+								{
+									CommentNode->CreateNewGuid();
+									CommentNode->PostPlacedNewNode();
+									CommentNode->AllocateDefaultPins();
+									
+									CommentNode->NodePosX = (int32)NodePosX;
+									CommentNode->NodePosY = (int32)NodePosY - 100; // Offset above the node
+									CommentNode->NodeWidth = 300;
+									CommentNode->NodeHeight = 100;
+									CommentNode->CommentColor = FLinearColor(1.0f, 0.5f, 0.0f, 1.0f); // Orange color for conflicts
+									CommentNode->NodeComment = FString::Printf(TEXT("⚠ CONFLICT MARKER ⚠\nNode: %s\nThis function was copied from remote due to conflicts.\nOriginal local function preserved."), *NodeTitle);
+									CommentNode->bCommentBubblePinned = true;
+									CommentNode->bCommentBubbleVisible = true;
+									
+									NewGraph->AddNode(CommentNode, true);
+									UE_LOG(LogTemp, Log, TEXT("AddGraph: Created conflict marker comment at (%.0f, %.0f) for node '%s'"), NodePosX, NodePosY, *NodeTitle);
+								}
+							}
 						}
 					}
 				}

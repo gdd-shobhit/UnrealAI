@@ -9,6 +9,17 @@
 #include "Dom/JsonObject.h"
 
 /**
+ * Perforce resolve method enumeration
+ */
+enum class EPerforceResolveMethod
+{
+	AcceptYours,      // Accept local changes
+	AcceptTheirs,     // Accept remote changes
+	AcceptMerge,      // Accept merged result (after manual merge)
+	Ignore            // Ignore the conflict
+};
+
+/**
  * Perforce integration adapter for Blueprint Merge Tool
  * Handles:
  * - Detecting Perforce conflicts
@@ -199,16 +210,5 @@ private:
 	 * @return Temporary directory path
 	 */
 	static FString GetTempDirectory();
-};
-
-/**
- * Perforce resolve method enumeration
- */
-enum class EPerforceResolveMethod
-{
-	AcceptYours,      // Accept local changes
-	AcceptTheirs,     // Accept remote changes
-	AcceptMerge,      // Accept merged result (after manual merge)
-	Ignore            // Ignore the conflict
 };
 

@@ -69,6 +69,12 @@ private:
 	FSlateColor GetConflictSeverityColor(EConflictSeverity Severity) const;
 	FText GetStatusText() const;
 	FSlateColor GetStatusColor() const;
+	
+	// Visibility helpers for Perforce section
+	EVisibility GetPerforceSectionVisibility() const;
+	EVisibility GetSelectedBlueprintVisibility() const;
+	EVisibility GetConflictCountVisibility() const;
+	EVisibility GetPostMergeActionsVisibility() const;
 
 	// File dialog helpers
 	bool ShowBlueprintSelectionDialog(FString& OutSelectedPath);

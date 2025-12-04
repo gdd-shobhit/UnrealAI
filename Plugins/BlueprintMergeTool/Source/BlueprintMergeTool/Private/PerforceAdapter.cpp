@@ -13,22 +13,27 @@
 bool FPerforceAdapter::IsPerforceAvailable()
 {
 	ISourceControlModule& SourceControlModule = ISourceControlModule::Get();
-	ISourceControlProvider* Provider = SourceControlModule.GetProvider();
+	ISourceControlProvider& Provider = SourceControlModule.GetProvider();
 	
-	if (!Provider)
+	if (!Provider.IsEnabled())
 	{
 		return false;
 	}
 
 	// Check if the provider is Perforce
-	FName ProviderName = Provider->GetName();
+	FName ProviderName = Provider.GetName();
 	return ProviderName == "Perforce" || ProviderName == "P4";
 }
 
 ISourceControlProvider* FPerforceAdapter::GetSourceControlProvider()
 {
 	ISourceControlModule& SourceControlModule = ISourceControlModule::Get();
-	return SourceControlModule.GetProvider();
+	ISourceControlProvider& Provider = SourceControlModule.GetProvider();
+	if (Provider.IsEnabled())
+	{
+		return &Provider;
+	}
+	return nullptr;
 }
 
 bool FPerforceAdapter::IsFileManagedByPerforce(const FString& FilePath)
@@ -86,7 +91,7 @@ bool FPerforceAdapter::HasPerforceConflicts(const FString& BlueprintPath, FStrin
 
 	if (FileState->IsConflicted())
 	{
-		OutConflictInfo = FString::Printf(TEXT("File has conflicts in Perforce. State: %s"), *FileState->ToString());
+		OutConflictInfo = FString::Printf(TEXT("File has conflicts in Perforce"));
 		return true;
 	}
 
@@ -199,18 +204,17 @@ bool FPerforceAdapter::CheckoutFile(const FString& FilePath, FString& OutError)
 		return false;
 	}
 
-	TSharedRef<FCheckOut, ESPMode::ThreadSafe> CheckOutOperation = ISourceControlOperation::Create<FCheckOut>();
-	CheckOutOperation->SetFiles({ FilePath });
+	// Use provider's Execute method with CheckOut operation
+	TSharedRef<FCheckOut, ESPMode::ThreadSafe> CheckOutOp = ISourceControlOperation::Create<FCheckOut>();
+	ECommandResult::Type Result = Provider->Execute(CheckOutOp, TArray<FString>{FilePath}, EConcurrency::Synchronous);
 	
-	ECommandResult::Type Result = Provider->Execute(CheckOutOperation, EConcurrency::Asynchronous);
-	
-	if (Result != ECommandResult::Succeeded)
+	if (Result == ECommandResult::Succeeded)
 	{
-		OutError = FString::Printf(TEXT("Checkout failed: %s"), *CheckOutOperation->GetResultInfo());
-		return false;
+		return true;
 	}
-
-	return true;
+	
+	OutError = TEXT("Checkout failed");
+	return false;
 }
 
 bool FPerforceAdapter::ResolveConflict(const FString& FilePath, EPerforceResolveMethod ResolveMethod, FString& OutError)
@@ -228,35 +232,17 @@ bool FPerforceAdapter::ResolveConflict(const FString& FilePath, EPerforceResolve
 		return false;
 	}
 
-	TSharedRef<FResolve, ESPMode::ThreadSafe> ResolveOperation = ISourceControlOperation::Create<FResolve>();
-	ResolveOperation->SetFiles({ FilePath });
-
-	// Set resolve method
-	switch (ResolveMethod)
-	{
-	case EPerforceResolveMethod::AcceptYours:
-		ResolveOperation->SetResolutionMethod(EResolveMethod::AcceptYours);
-		break;
-	case EPerforceResolveMethod::AcceptTheirs:
-		ResolveOperation->SetResolutionMethod(EResolveMethod::AcceptTheirs);
-		break;
-	case EPerforceResolveMethod::AcceptMerge:
-		ResolveOperation->SetResolutionMethod(EResolveMethod::AcceptMerge);
-		break;
-	case EPerforceResolveMethod::Ignore:
-		ResolveOperation->SetResolutionMethod(EResolveMethod::Ignore);
-		break;
-	}
-
-	ECommandResult::Type Result = Provider->Execute(ResolveOperation, EConcurrency::Asynchronous);
+	// Use provider's Execute method with Resolve operation
+	TSharedRef<FResolve, ESPMode::ThreadSafe> ResolveOp = ISourceControlOperation::Create<FResolve>();
+	ECommandResult::Type Result = Provider->Execute(ResolveOp, TArray<FString>{FilePath}, EConcurrency::Synchronous);
 	
-	if (Result != ECommandResult::Succeeded)
+	if (Result == ECommandResult::Succeeded)
 	{
-		OutError = FString::Printf(TEXT("Resolve failed: %s"), *ResolveOperation->GetResultInfo());
-		return false;
+		return true;
 	}
-
-	return true;
+	
+	OutError = TEXT("Resolve failed");
+	return false;
 }
 
 bool FPerforceAdapter::SubmitFiles(const TArray<FString>& FilePaths, const FString& Description, FString& OutError)
@@ -274,19 +260,18 @@ bool FPerforceAdapter::SubmitFiles(const TArray<FString>& FilePaths, const FStri
 		return false;
 	}
 
-	TSharedRef<FCheckIn, ESPMode::ThreadSafe> CheckInOperation = ISourceControlOperation::Create<FCheckIn>();
-	CheckInOperation->SetFiles(FilePaths);
-	CheckInOperation->SetDescription(FText::FromString(Description));
-
-	ECommandResult::Type Result = Provider->Execute(CheckInOperation, EConcurrency::Asynchronous);
+	// Use provider's Execute method with CheckIn operation
+	TSharedRef<FCheckIn, ESPMode::ThreadSafe> CheckInOp = ISourceControlOperation::Create<FCheckIn>();
+	CheckInOp->SetDescription(FText::FromString(Description));
+	ECommandResult::Type Result = Provider->Execute(CheckInOp, FilePaths, EConcurrency::Synchronous);
 	
-	if (Result != ECommandResult::Succeeded)
+	if (Result == ECommandResult::Succeeded)
 	{
-		OutError = FString::Printf(TEXT("Submit failed: %s"), *CheckInOperation->GetResultInfo());
-		return false;
+		return true;
 	}
-
-	return true;
+	
+	OutError = TEXT("Submit failed");
+	return false;
 }
 
 int32 FPerforceAdapter::DetectConflictedBlueprints(TArray<FString>& OutConflictedBlueprints)
@@ -313,7 +298,7 @@ int32 FPerforceAdapter::DetectConflictedBlueprints(TArray<FString>& OutConflicte
 
 	for (const FAssetData& AssetData : BlueprintAssets)
 	{
-		FString AssetPath = AssetData.ObjectPath.ToString();
+		FString AssetPath = AssetData.GetObjectPathString();
 		FString FilePath = AssetPathToFilePath(AssetPath);
 
 		if (FilePath.IsEmpty() || !IsBlueprintFile(FilePath))
@@ -380,11 +365,15 @@ FString FPerforceAdapter::AssetPathToFilePath(const FString& AssetPath)
 		PackageName = PackageName.Mid(1);
 	}
 
-	// Convert to long package name
-	FString LongPackageName = FPackageName::ConvertToLongPackageName(PackageName);
-	if (LongPackageName.IsEmpty())
+	// Convert to long package name - in UE 5.5, package names are already long format
+	FString LongPackageName = PackageName;
+	if (!FPackageName::IsValidLongPackageName(LongPackageName))
 	{
-		return FString();
+		// Try to convert if it's a short name
+		if (!FPackageName::TryConvertFilenameToLongPackageName(PackageName, LongPackageName))
+		{
+			return FString();
+		}
 	}
 
 	// Get the file path
@@ -448,18 +437,17 @@ bool FPerforceAdapter::RevertFile(const FString& FilePath, FString& OutError)
 		return false;
 	}
 
-	TSharedRef<FRevert, ESPMode::ThreadSafe> RevertOperation = ISourceControlOperation::Create<FRevert>();
-	RevertOperation->SetFiles({ FilePath });
-
-	ECommandResult::Type Result = Provider->Execute(RevertOperation, EConcurrency::Asynchronous);
+	// Use provider's Execute method with Revert operation
+	TSharedRef<FRevert, ESPMode::ThreadSafe> RevertOp = ISourceControlOperation::Create<FRevert>();
+	ECommandResult::Type Result = Provider->Execute(RevertOp, TArray<FString>{FilePath}, EConcurrency::Synchronous);
 	
-	if (Result != ECommandResult::Succeeded)
+	if (Result == ECommandResult::Succeeded)
 	{
-		OutError = FString::Printf(TEXT("Revert failed: %s"), *RevertOperation->GetResultInfo());
-		return false;
+		return true;
 	}
-
-	return true;
+	
+	OutError = TEXT("Revert failed");
+	return false;
 }
 
 bool FPerforceAdapter::LoadBlueprintFromVersion(const FString& FilePath, const FString& Version, UBlueprint*& OutBlueprint, TSharedPtr<FJsonObject>& OutSnapshot, FString& OutError)

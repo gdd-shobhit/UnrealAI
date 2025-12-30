@@ -247,11 +247,81 @@ bool FApplyEngine::ApplyOperation(
 						UEdGraph* TargetGraph = FindGraphByName(TargetBlueprint, Operation.TargetGraph);
 						if (TargetGraph)
 						{
+							// Modify the node data to rename it and add a comment indicating it's a conflict copy
+							FString OriginalNodeTitle = NodeDataObj->GetStringField(TEXT("NodeTitle"));
+							FString RenamedTitle = OriginalNodeTitle + TEXT(" (Remote Copy)");
+							NodeDataObj->SetStringField(TEXT("NodeTitle"), RenamedTitle);
+							
+							// Add a comment to indicate this is a conflict copy
+							FString OriginalComment = NodeDataObj->GetStringField(TEXT("NodeComment"));
+							FString ConflictComment = FString::Printf(TEXT("[MERGE CONFLICT COPY] This is the remote version of '%s'. The local version is also present. Please review and decide which to keep."), *OriginalNodeTitle);
+							if (!OriginalComment.IsEmpty())
+							{
+								ConflictComment = OriginalComment + TEXT("\n\n") + ConflictComment;
+							}
+							NodeDataObj->SetStringField(TEXT("NodeComment"), ConflictComment);
+							
+							// Offset the position slightly to the right so both nodes are visible
+							double NodePosX = NodeDataObj->GetNumberField(TEXT("NodePosX"));
+							double NodePosY = NodeDataObj->GetNumberField(TEXT("NodePosY"));
+							NodeDataObj->SetNumberField(TEXT("NodePosX"), NodePosX + 400.0); // Offset 400 units to the right
+							
 							// Create the node using the existing CreateNodeFromData function
 							UEdGraphNode* NewNode = CreateNodeFromData(TargetGraph, NodeDataObj, OutError);
 							if (NewNode)
 							{
-								UE_LOG(LogTemp, Log, TEXT("AddNode: Successfully created KeepBoth node '%s' in graph '%s'"), *ElementName, *Operation.TargetGraph);
+								// Ensure the comment is set (in case CreateNodeFromData didn't apply it)
+								NewNode->NodeComment = ConflictComment;
+								
+								// Create a visual comment box around the conflict node to make it stand out
+								UEdGraphNode_Comment* ConflictCommentBox = NewObject<UEdGraphNode_Comment>(TargetGraph, UEdGraphNode_Comment::StaticClass());
+								if (ConflictCommentBox)
+								{
+									ConflictCommentBox->CreateNewGuid();
+									ConflictCommentBox->PostPlacedNewNode();
+									ConflictCommentBox->AllocateDefaultPins();
+									
+									// Position the comment box to wrap around the conflict node
+									// Estimate node size (most nodes are roughly 200-400 wide, 100-200 tall)
+									// We'll use a generous size to ensure the node is fully wrapped
+									int32 EstimatedNodeWidth = 400;
+									int32 EstimatedNodeHeight = 200;
+									
+									// Try to get actual node size if available (after node is created)
+									// Note: Node size is only accurate after the node is fully constructed and rendered
+									// For now, we'll use a generous estimate
+									if (UK2Node* K2Node = Cast<UK2Node>(NewNode))
+									{
+										// K2Nodes typically have a minimum size, but can expand
+										// Use a reasonable default that will wrap most nodes
+										EstimatedNodeWidth = 450;
+										EstimatedNodeHeight = 220;
+									}
+									
+									// Position comment box to surround the node with padding
+									int32 Padding = 60; // Generous padding for visibility
+									ConflictCommentBox->NodePosX = NewNode->NodePosX - Padding;
+									ConflictCommentBox->NodePosY = NewNode->NodePosY - Padding;
+									ConflictCommentBox->NodeWidth = EstimatedNodeWidth + (Padding * 2);
+									ConflictCommentBox->NodeHeight = EstimatedNodeHeight + (Padding * 2);
+									
+									// Use a distinct bright orange/red color for conflict markers (highly visible)
+									// RGB: (255, 100, 0) = Bright orange, with high opacity for visibility
+									ConflictCommentBox->CommentColor = FLinearColor(1.0f, 0.39f, 0.0f, 0.85f); // Bright orange-red
+									ConflictCommentBox->NodeComment = FString::Printf(TEXT("⚠️ MERGE CONFLICT COPY ⚠️\n\n🔴 REMOTE VERSION\n\nOriginal: '%s'\n\n⚠ The LOCAL version is also present.\nPlease review both and decide which to keep."), *OriginalNodeTitle);
+									ConflictCommentBox->bCommentBubblePinned = true;
+									ConflictCommentBox->bCommentBubbleVisible = true;
+									ConflictCommentBox->bColorCommentBubble = true; // Enable colored bubble background
+									
+									// Add the comment box to the graph
+									TargetGraph->AddNode(ConflictCommentBox, true);
+									
+									UE_LOG(LogTemp, Log, TEXT("AddNode: Created visual conflict marker comment box (orange) around remote copy node '%s' at (%.0f, %.0f)"), 
+										*RenamedTitle, (float)ConflictCommentBox->NodePosX, (float)ConflictCommentBox->NodePosY);
+								}
+								
+								UE_LOG(LogTemp, Log, TEXT("AddNode: Successfully created KeepBoth node '%s' (renamed from '%s') in graph '%s' at offset position"), 
+									*RenamedTitle, *OriginalNodeTitle, *Operation.TargetGraph);
 								return true;
 							}
 							else
@@ -287,8 +357,16 @@ bool FApplyEngine::ApplyOperation(
 		{
 			UE_LOG(LogTemp, Log, TEXT("AddGraph: Starting AddGraph operation for target: %s"), *Operation.TargetId);
 			
+			// Debug: Log all AdditionalData keys
+			UE_LOG(LogTemp, Log, TEXT("AddGraph: Operation has %d AdditionalData entries"), Operation.AdditionalData.Num());
+			for (const auto& Pair : Operation.AdditionalData)
+			{
+				UE_LOG(LogTemp, Log, TEXT("AddGraph: AdditionalData key: '%s', value length: %d"), *Pair.Key, Pair.Value.Len());
+			}
+			
 			// One-shot graph creation using payload when Base lacks the function
 			FString GraphDataJson = Operation.AdditionalData.FindRef(TEXT("GraphData"));
+			UE_LOG(LogTemp, Log, TEXT("AddGraph: GraphDataJson length: %d"), GraphDataJson.Len());
 			if (GraphDataJson.IsEmpty())
 			{
 				// Check if this is a "KeepBoth" operation - if so, try to use the GraphData from the operation
@@ -406,20 +484,49 @@ bool FApplyEngine::ApplyOperation(
 				else
 				{
 					UE_LOG(LogTemp, Log, TEXT("AddGraph: Regular operation - using original function name: %s"), *NewFuncName.ToString());
+					
+					// Check if this is a conflict resolution operation (has GraphData and Reason)
+					FString Reason = Operation.AdditionalData.FindRef(TEXT("Reason"));
+					bool bIsConflictResolution = !Reason.IsEmpty() && !GraphDataJson.IsEmpty();
+					
 					if (UFunction* Existing = TargetBlueprint->SkeletonGeneratedClass ? TargetBlueprint->SkeletonGeneratedClass->FindFunctionByName(NewFuncName) : nullptr)
 					{
-						// Function exists; do nothing here (granular ops will handle differences)
-						UE_LOG(LogTemp, Log, TEXT("AddGraph: Function '%s' already exists, skipping creation"), *NewFuncName.ToString());
-						return true;
+						if (bIsConflictResolution)
+						{
+							// For conflict resolution, find the existing graph and add missing nodes from remote
+							// Skip all function creation logic - just add nodes to existing function
+							UE_LOG(LogTemp, Log, TEXT("AddGraph: Function '%s' exists - conflict resolution mode: will add missing nodes from remote to existing function"), *NewFuncName.ToString());
+							
+							// Find the existing graph
+							NewGraph = FindGraphByName(TargetBlueprint, NewFuncName.ToString());
+							if (!NewGraph)
+							{
+								OutError = FString::Printf(TEXT("Function '%s' exists but graph not found"), *NewFuncName.ToString());
+								return false;
+							}
+							
+							// Skip function creation - go directly to adding nodes
+							// (We'll use the NodesArray from GraphDataObj below)
+						}
+						else
+						{
+							// Function exists and this is not a conflict resolution; granular ops will handle differences
+							UE_LOG(LogTemp, Log, TEXT("AddGraph: Function '%s' already exists, skipping creation (no conflict resolution)"), *NewFuncName.ToString());
+							return true;
+						}
 					}
 				}
 
-				// First, let's check what function signature we need from the payload
+				// Declare variables that might be used in both paths (function creation or node addition)
 				TArray<FBPVariableDescription> InputParams;
 				TArray<FBPVariableDescription> OutputParams;
-				
-				// Parse function entry node to get input parameters
 				const TArray<TSharedPtr<FJsonValue>>* NodesArray = nullptr;
+				
+				// Only do function creation if we don't already have a graph (conflict resolution with existing function)
+				if (!NewGraph)
+				{
+					// First, let's check what function signature we need from the payload
+					// Parse function entry node to get input parameters
 				if (GraphDataObj->TryGetArrayField(TEXT("Nodes"), NodesArray) && NodesArray)
 				{
 					UE_LOG(LogTemp, Log, TEXT("AddGraph: Found %d nodes in payload"), NodesArray->Num());
@@ -735,17 +842,68 @@ bool FApplyEngine::ApplyOperation(
 				}
 				
 				FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(TargetBlueprint);
+				}
 
-
-				// Recreate nodes from payload
-				if (GraphDataObj->TryGetArrayField(TEXT("Nodes"), NodesArray) && NodesArray)
+			// Recreate nodes from payload (or add missing nodes to existing function)
+			// This code path is used both for new function creation and conflict resolution
+			if (GraphDataObj->TryGetArrayField(TEXT("Nodes"), NodesArray) && NodesArray)
 				{
+					UE_LOG(LogTemp, Log, TEXT("AddGraph: Processing %d nodes from GraphData"), NodesArray->Num());
+					
+					// First pass: Log all nodes in GraphData for debugging
+					UE_LOG(LogTemp, Log, TEXT("AddGraph: === All nodes in GraphData ==="));
+					for (int32 i = 0; i < NodesArray->Num(); i++)
+					{
+						const TSharedPtr<FJsonValue>& NodeValue = (*NodesArray)[i];
+						if (NodeValue.IsValid() && NodeValue->Type == EJson::Object)
+						{
+							TSharedPtr<FJsonObject> NodeObj = NodeValue->AsObject();
+							FString NodeClass = NodeObj->GetStringField(TEXT("NodeClass"));
+							FString NodeGuid = NodeObj->GetStringField(TEXT("NodeGuid"));
+							FString NodeTitle = NodeObj->GetStringField(TEXT("NodeTitle"));
+							
+							// For CallFunction nodes, also log the function name
+							FString NodeFunctionName;
+							if (NodeClass.Contains(TEXT("K2Node_CallFunction")))
+							{
+								if (NodeObj->HasField(TEXT("FunctionName")))
+								{
+									NodeFunctionName = NodeObj->GetStringField(TEXT("FunctionName"));
+								}
+								else if (NodeObj->HasField(TEXT("FunctionReference")))
+								{
+									TSharedPtr<FJsonObject> FuncRef = NodeObj->GetObjectField(TEXT("FunctionReference"));
+									if (FuncRef.IsValid() && FuncRef->HasField(TEXT("MemberName")))
+									{
+										NodeFunctionName = FuncRef->GetStringField(TEXT("MemberName"));
+									}
+								}
+							}
+							
+							if (!NodeFunctionName.IsEmpty())
+							{
+								UE_LOG(LogTemp, Log, TEXT("  Node %d: Class='%s', Title='%s', Function='%s', GUID='%s'"), 
+									i, *NodeClass, *NodeTitle, *NodeFunctionName, *NodeGuid);
+							}
+							else
+							{
+								UE_LOG(LogTemp, Log, TEXT("  Node %d: Class='%s', Title='%s', GUID='%s'"), 
+									i, *NodeClass, *NodeTitle, *NodeGuid);
+							}
+						}
+					}
+					UE_LOG(LogTemp, Log, TEXT("AddGraph: === End of node list ==="));
+					
 					for (const TSharedPtr<FJsonValue>& NodeValue : *NodesArray)
 					{
 						if (NodeValue.IsValid() && NodeValue->Type == EJson::Object)
 						{
 							TSharedPtr<FJsonObject> NodeObj = NodeValue->AsObject();
 							FString NodeClass = NodeObj->GetStringField(TEXT("NodeClass"));
+							FString NodeGuid = NodeObj->GetStringField(TEXT("NodeGuid"));
+							FString NodeTitle = NodeObj->GetStringField(TEXT("NodeTitle"));
+							
+							UE_LOG(LogTemp, Log, TEXT("AddGraph: Processing node - Class: '%s', Title: '%s', GUID: '%s'"), *NodeClass, *NodeTitle, *NodeGuid);
 							
 							// Skip function entry nodes as they're automatically created by AddFunctionGraph
 							if (NodeClass.Contains(TEXT("K2Node_FunctionEntry")))
@@ -761,13 +919,199 @@ bool FApplyEngine::ApplyOperation(
 								continue;
 							}
 							
-							FString NodeError;
-							if (!AddNode(TargetBlueprint, NewFuncName.ToString(), NodeObj, NodeError))
+							// Check if node already exists in the graph (by GUID or title)
+							bool bNodeExists = false;
+							FString SkipReason;
+							if (NewGraph)
 							{
-								UE_LOG(LogTemp, Warning, TEXT("AddGraph: Failed to add node to function %s: %s"), *NewFuncName.ToString(), *NodeError);
+								// Check by GUID first
+								if (!NodeGuid.IsEmpty())
+								{
+									UEdGraphNode* ExistingNode = FindNodeByGuid(NewGraph, NodeGuid);
+									if (ExistingNode)
+									{
+										FString ExistingTitle = ExistingNode->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
+										SkipReason = FString::Printf(TEXT("Node with GUID %s already exists (existing title: '%s', new title: '%s')"), *NodeGuid, *ExistingTitle, *NodeTitle);
+										UE_LOG(LogTemp, Log, TEXT("AddGraph: %s - skipping"), *SkipReason);
+										bNodeExists = true;
+									}
+								}
+								
+								// For conflict resolution, ONLY check by GUID to avoid false matches
+								// Title/class matching can incorrectly skip nodes that were deleted and need to be re-added
+								// If GUID doesn't match, the node should be added (it's either new or was deleted)
+								FString Reason = Operation.AdditionalData.FindRef(TEXT("Reason"));
+								bool bIsConflictResolution = !Reason.IsEmpty() && !GraphDataJson.IsEmpty();
+								
+								if (!bIsConflictResolution && !bNodeExists && !NodeTitle.IsEmpty())
+								{
+									// Only do title/class matching for non-conflict-resolution cases
+									// For conflict resolution, we trust GUID matching only to avoid skipping deleted nodes
+									for (UEdGraphNode* ExistingNode : NewGraph->Nodes)
+									{
+										if (ExistingNode)
+										{
+											FString ExistingTitle = ExistingNode->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
+											FString ExistingClass = ExistingNode->GetClass()->GetName();
+											
+											// For CallFunction nodes, also check the function name to avoid false matches
+											if (NodeClass.Contains(TEXT("K2Node_CallFunction")) && ExistingClass.Contains(TEXT("K2Node_CallFunction")))
+											{
+												// Get function names from both nodes
+												FString NewFunctionName;
+												FString ExistingFunctionName;
+												
+												if (NodeObj->HasField(TEXT("FunctionName")))
+												{
+													NewFunctionName = NodeObj->GetStringField(TEXT("FunctionName"));
+												}
+												
+												if (UK2Node_CallFunction* ExistingCallFunc = Cast<UK2Node_CallFunction>(ExistingNode))
+												{
+													ExistingFunctionName = ExistingCallFunc->GetFunctionName().ToString();
+												}
+												
+												// Only skip if title AND function name match
+												if (ExistingTitle == NodeTitle && ExistingClass == NodeClass && 
+												    !NewFunctionName.IsEmpty() && NewFunctionName == ExistingFunctionName)
+												{
+													SkipReason = FString::Printf(TEXT("Node with title '%s', class '%s', and function '%s' already exists"), *NodeTitle, *NodeClass, *NewFunctionName);
+													UE_LOG(LogTemp, Log, TEXT("AddGraph: %s - skipping"), *SkipReason);
+													bNodeExists = true;
+													break;
+												}
+											}
+											else if (ExistingTitle == NodeTitle && ExistingClass == NodeClass)
+											{
+												// For non-CallFunction nodes, match by title and class
+												SkipReason = FString::Printf(TEXT("Node with title '%s' and class '%s' already exists"), *NodeTitle, *NodeClass);
+												UE_LOG(LogTemp, Log, TEXT("AddGraph: %s - skipping"), *SkipReason);
+												bNodeExists = true;
+												break;
+											}
+										}
+									}
+								}
+								else if (bIsConflictResolution && !bNodeExists)
+								{
+									// For conflict resolution, log that we're adding because GUID didn't match
+									UE_LOG(LogTemp, Log, TEXT("AddGraph: Node '%s' (GUID: %s) not found by GUID - will add (may have been deleted locally)"), *NodeTitle, *NodeGuid);
+								}
+							}
+							
+							if (!bNodeExists)
+							{
+								UE_LOG(LogTemp, Log, TEXT("AddGraph: Attempting to add node '%s' (GUID: %s, Class: %s) to function %s"), 
+									*NodeTitle, *NodeGuid, *NodeClass, *NewFuncName.ToString());
+								
+								FString NodeError;
+								if (AddNode(TargetBlueprint, NewFuncName.ToString(), NodeObj, NodeError))
+								{
+									UE_LOG(LogTemp, Log, TEXT("AddGraph: ✅ Successfully added node '%s' (GUID: %s) to function %s"), *NodeTitle, *NodeGuid, *NewFuncName.ToString());
+									
+									// For conflict resolution, mark nodes from remote with colored comment
+									FString Reason = Operation.AdditionalData.FindRef(TEXT("Reason"));
+									bool bIsConflictResolution = !Reason.IsEmpty() && !GraphDataJson.IsEmpty();
+									if (bIsConflictResolution && NewGraph)
+									{
+										// Find the node we just added
+										UEdGraphNode* AddedNode = FindNodeByGuid(NewGraph, NodeGuid);
+										if (!AddedNode && !NodeTitle.IsEmpty())
+										{
+											// Fallback: find by title
+											for (UEdGraphNode* Node : NewGraph->Nodes)
+											{
+												if (Node)
+												{
+													FString ExistingTitle = Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
+													if (ExistingTitle == NodeTitle && Node->GetClass()->GetName() == NodeClass)
+													{
+														AddedNode = Node;
+														break;
+													}
+												}
+											}
+										}
+										
+										if (AddedNode)
+										{
+											// Offset the node vertically to avoid overlap with existing graph structure
+											// Move it down by a significant amount (400 units) to keep it visually separated
+											const int32 VerticalOffset = 400;
+											AddedNode->NodePosY += VerticalOffset;
+											
+											UE_LOG(LogTemp, Log, TEXT("AddGraph: Offset remote node '%s' down by %d units to avoid overlap (new Y: %.0f)"), 
+												*NodeTitle, VerticalOffset, (float)AddedNode->NodePosY);
+											
+											// Create a visual comment box around the remote node to make it stand out
+											UEdGraphNode_Comment* RemoteCommentBox = NewObject<UEdGraphNode_Comment>(NewGraph, UEdGraphNode_Comment::StaticClass());
+											if (RemoteCommentBox)
+											{
+												RemoteCommentBox->CreateNewGuid();
+												RemoteCommentBox->PostPlacedNewNode();
+												RemoteCommentBox->AllocateDefaultPins();
+												
+												// Position the comment box to wrap around the node
+												// Account for comment box header height (typically ~40-50 units)
+												int32 EstimatedNodeWidth = 400;
+												int32 EstimatedNodeHeight = 200;
+												int32 CommentHeaderHeight = 50; // Space for "FROM REMOTE" header
+												
+												if (UK2Node* K2Node = Cast<UK2Node>(AddedNode))
+												{
+													EstimatedNodeWidth = 450;
+													EstimatedNodeHeight = 220;
+												}
+												
+												// Use more padding to ensure node doesn't overlap with comment header
+												int32 HorizontalPadding = 60;
+												int32 TopPadding = 80; // Extra padding at top for header
+												int32 BottomPadding = 60;
+												
+												// Position comment box: start above the node to accommodate header
+												RemoteCommentBox->NodePosX = AddedNode->NodePosX - HorizontalPadding;
+												RemoteCommentBox->NodePosY = AddedNode->NodePosY - TopPadding; // Start higher to fit header
+												RemoteCommentBox->NodeWidth = EstimatedNodeWidth + (HorizontalPadding * 2);
+												RemoteCommentBox->NodeHeight = EstimatedNodeHeight + TopPadding + BottomPadding; // Extra height for header
+												
+												// Adjust node position within comment box to avoid header overlap
+												// Move node down slightly within the comment box
+												AddedNode->NodePosY += 30; // Small additional offset to clear header area
+												
+												// Use a distinct blue color for remote nodes (different from conflict orange)
+												RemoteCommentBox->CommentColor = FLinearColor(0.2f, 0.6f, 1.0f, 0.85f); // Bright blue
+												RemoteCommentBox->NodeComment = FString::Printf(TEXT("🔵 FROM REMOTE\n\nNode: %s\nAdded from remote version - please review."), *NodeTitle);
+												RemoteCommentBox->bCommentBubblePinned = false; // Don't show bubble - text is already in the comment box
+												RemoteCommentBox->bCommentBubbleVisible = false; // Disable bubble to avoid redundancy
+												RemoteCommentBox->bColorCommentBubble = true;
+												
+												NewGraph->AddNode(RemoteCommentBox, true);
+												
+												UE_LOG(LogTemp, Log, TEXT("AddGraph: Created blue comment box around remote node '%s' at (%.0f, %.0f)"), 
+													*NodeTitle, (float)RemoteCommentBox->NodePosX, (float)RemoteCommentBox->NodePosY);
+											}
+										}
+									}
+								}
+								else
+								{
+									UE_LOG(LogTemp, Error, TEXT("AddGraph: ❌ FAILED to add node '%s' (GUID: %s, Class: %s) to function %s"), 
+										*NodeTitle, *NodeGuid, *NodeClass, *NewFuncName.ToString());
+									UE_LOG(LogTemp, Error, TEXT("AddGraph: Error details: %s"), *NodeError);
+									
+									// Log node data for debugging
+									FString NodeDataDebug;
+									TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&NodeDataDebug);
+									FJsonSerializer::Serialize(NodeObj.ToSharedRef(), Writer);
+									UE_LOG(LogTemp, Error, TEXT("AddGraph: Node data (first 500 chars): %s"), *NodeDataDebug.Left(500));
+								}
 							}
 						}
 					}
+				}
+				else
+				{
+					UE_LOG(LogTemp, Warning, TEXT("AddGraph: No Nodes array found in GraphData"));
 				}
 
 				// Log all nodes in the graph for debugging
@@ -1682,15 +2026,22 @@ bool FApplyEngine::UpdateNodeProperty(
 	UEdGraph* TargetGraph = FindGraphByName(Blueprint, GraphName);
 	if (!TargetGraph)
 	{
-		OutError = FString::Printf(TEXT("Graph '%s' not found"), *GraphName);
-		return false;
+		// Graph doesn't exist - this might happen if AddGraph failed earlier
+		// Log a warning but don't fail - allow other operations to continue
+		UE_LOG(LogTemp, Warning, TEXT("UpdateNodeProperty: Graph '%s' not found - skipping operation (may be in a graph that wasn't created)"), *GraphName);
+		OutError = FString::Printf(TEXT("Graph '%s' not found (skipped)"), *GraphName);
+		return true; // Return true to allow other operations to continue
 	}
 
 	UEdGraphNode* TargetNode = FindNodeByGuid(TargetGraph, NodeGuid);
 	if (!TargetNode)
 	{
-		OutError = FString::Printf(TEXT("Node with GUID %s not found"), *NodeGuid);
-		return false;
+		// Node doesn't exist - this might happen if AddNode failed, or if the node is in a graph that wasn't created
+		// Log a warning but don't fail - allow other operations to continue
+		UE_LOG(LogTemp, Warning, TEXT("UpdateNodeProperty: Node with GUID %s not found in graph '%s' - skipping operation (may be in a graph that wasn't created)"), 
+			*NodeGuid, *GraphName);
+		OutError = FString::Printf(TEXT("Node with GUID %s not found (skipped)"), *NodeGuid);
+		return true; // Return true to allow other operations to continue
 	}
 
 	// Check if this is a "KeepBoth" operation - if so, just log and return success
@@ -3103,7 +3454,75 @@ UEdGraphNode* FApplyEngine::CreateNodeFromData(
 			}
 			else
 			{
-				UE_LOG(LogTemp, Warning, TEXT("CreateNodeFromData: Could not find function %s in class %s"), *FunctionName, *FunctionClass);
+				// Function not found in engine classes - try as custom Blueprint function
+				// Check if this is a function in the Blueprint itself
+				UBlueprint* Blueprint = Cast<UBlueprint>(Graph->GetOuter());
+				if (Blueprint)
+				{
+					// Try to find the function in the Blueprint
+					UFunction* BlueprintFunction = nullptr;
+					if (Blueprint->SkeletonGeneratedClass)
+					{
+						BlueprintFunction = Blueprint->SkeletonGeneratedClass->FindFunctionByName(FName(*FunctionName));
+					}
+					
+					if (!BlueprintFunction && Blueprint->GeneratedClass)
+					{
+						BlueprintFunction = Blueprint->GeneratedClass->FindFunctionByName(FName(*FunctionName));
+					}
+					
+					if (BlueprintFunction)
+					{
+						// This is a custom function in the Blueprint - use SetSelfMember
+						CallFunctionNode->FunctionReference.SetSelfMember(FName(*FunctionName));
+						
+						// Set GUID before ReconstructNode
+						FString NodeGuidStr = NodeData->GetStringField(TEXT("NodeGuid"));
+						if (!NodeGuidStr.IsEmpty())
+						{
+							FGuid NodeGuid;
+							if (FGuid::Parse(NodeGuidStr, NodeGuid))
+							{
+								CallFunctionNode->NodeGuid = NodeGuid;
+								UE_LOG(LogTemp, Log, TEXT("CreateNodeFromData: Set GUID before ReconstructNode (custom function): %s"), *NodeGuid.ToString());
+							}
+						}
+						
+						CallFunctionNode->ReconstructNode();
+						
+						// Verify GUID after ReconstructNode
+						if (!NodeGuidStr.IsEmpty())
+						{
+							FGuid NodeGuid;
+							if (FGuid::Parse(NodeGuidStr, NodeGuid))
+							{
+								if (CallFunctionNode->NodeGuid != NodeGuid)
+								{
+									UE_LOG(LogTemp, Warning, TEXT("CreateNodeFromData: GUID was regenerated by ReconstructNode (custom function)! Expected %s but got %s. Resetting..."), 
+										*NodeGuid.ToString(), *CallFunctionNode->NodeGuid.ToString());
+									CallFunctionNode->NodeGuid = NodeGuid;
+								}
+							}
+						}
+						
+						UE_LOG(LogTemp, Log, TEXT("CreateNodeFromData: Successfully set custom Blueprint function reference: %s"), *FunctionName);
+					}
+					else
+					{
+						UE_LOG(LogTemp, Error, TEXT("CreateNodeFromData: Could not find function %s in engine classes or Blueprint %s. Node will be invalid."), 
+							*FunctionName, *Blueprint->GetName());
+						// Don't set NewNode - let it remain nullptr so AddNode will fail gracefully
+						OutError = FString::Printf(TEXT("Function '%s' not found in engine classes or Blueprint"), *FunctionName);
+						return nullptr;
+					}
+				}
+				else
+				{
+					UE_LOG(LogTemp, Error, TEXT("CreateNodeFromData: Could not find function %s in class %s, and graph has no Blueprint owner"), 
+						*FunctionName, *FunctionClass);
+					OutError = FString::Printf(TEXT("Function '%s' not found and no Blueprint context"), *FunctionName);
+					return nullptr;
+				}
 			}
 		}
 

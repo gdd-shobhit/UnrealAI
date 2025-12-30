@@ -607,8 +607,49 @@ void FDiffEngine::DiffGraphs(
 		TSharedPtr<FJsonObject> LocalGraph = LocalGraphMap.FindRef(GraphName);
 		TSharedPtr<FJsonObject> RemoteGraph = RemoteGraphMap.FindRef(GraphName);
 
+		// Helper function to check if a graph is effectively empty (only has entry/result nodes)
+		auto IsEffectivelyEmpty = [](TSharedPtr<FJsonObject> Graph) -> bool
+		{
+			if (!Graph.IsValid())
+			{
+				return true;
+			}
+			
+			const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
+			if (!Graph->TryGetArrayField(TEXT("Nodes"), Nodes) || !Nodes)
+			{
+				return true;
+			}
+			
+			// Count non-entry/result nodes
+			int32 NonEntryResultNodeCount = 0;
+			for (const TSharedPtr<FJsonValue>& NodeValue : *Nodes)
+			{
+				if (NodeValue.IsValid() && NodeValue->Type == EJson::Object)
+				{
+					TSharedPtr<FJsonObject> NodeObj = NodeValue->AsObject();
+					FString NodeClass = NodeObj->GetStringField(TEXT("NodeClass"));
+					
+					// Skip function entry and result nodes - they don't count as "content"
+					if (!NodeClass.Contains(TEXT("K2Node_FunctionEntry")) && 
+					    !NodeClass.Contains(TEXT("K2Node_FunctionResult")))
+					{
+						NonEntryResultNodeCount++;
+					}
+				}
+			}
+			
+			// Graph is effectively empty if it only has entry/result nodes
+			return NonEntryResultNodeCount == 0;
+		};
+
+		// Check if Base graph is effectively empty (only entry/result nodes)
+		bool bBaseIsEmpty = IsEffectivelyEmpty(BaseGraph);
+		bool bBaseExists = BaseGraph.IsValid();
+
 		// Handle graph-level changes (addition/removal)
-		if (!BaseGraph.IsValid() && LocalGraph.IsValid() && RemoteGraph.IsValid())
+		// Treat empty Base functions as "not present" for conflict detection
+		if ((!bBaseExists || bBaseIsEmpty) && LocalGraph.IsValid() && RemoteGraph.IsValid())
 		{
 			// Graph added in both - check if they're the same
 			TArray<FString> DifferingFields;
@@ -643,9 +684,9 @@ void FDiffEngine::DiffGraphs(
 				UE_LOG(LogTemp, Log, TEXT("DiffEngine: Graph '%s' added identically in both - skipping operation"), *GraphName);
 			}
 		}
-		else if (!BaseGraph.IsValid() && LocalGraph.IsValid())
+		else if ((!bBaseExists || bBaseIsEmpty) && LocalGraph.IsValid() && !RemoteGraph.IsValid())
 		{
-			// Graph added locally only
+			// Graph added locally only (Base doesn't exist or is empty)
 			FMergeOperation Op = CreateOperation(EMergeOperationType::AddGraph, GraphName, TEXT(""));
 			// Attach full graph payload for one-shot creation
 			FString GraphDataString;
@@ -654,9 +695,9 @@ void FDiffEngine::DiffGraphs(
 			Op.AdditionalData.Add(TEXT("GraphData"), GraphDataString);
 			OutOperations.Add(Op);
 		}
-		else if (!BaseGraph.IsValid() && RemoteGraph.IsValid())
+		else if ((!bBaseExists || bBaseIsEmpty) && !LocalGraph.IsValid() && RemoteGraph.IsValid())
 		{
-			// Graph added remotely only
+			// Graph added remotely only (Base doesn't exist or is empty)
 			UE_LOG(LogTemp, Log, TEXT("DiffEngine: Function '%s' exists only in remote - creating AddGraph operation"), *GraphName);
 			FMergeOperation Op = CreateOperation(EMergeOperationType::AddGraph, GraphName, TEXT(""));
 			// Attach full graph payload for one-shot creation
@@ -666,13 +707,13 @@ void FDiffEngine::DiffGraphs(
 			Op.AdditionalData.Add(TEXT("GraphData"), GraphDataString);
 			OutOperations.Add(Op);
 		}
-		else if (BaseGraph.IsValid() && !LocalGraph.IsValid() && !RemoteGraph.IsValid())
+		else if (bBaseExists && !bBaseIsEmpty && !LocalGraph.IsValid() && !RemoteGraph.IsValid())
 		{
-			// Graph removed in both
+			// Graph removed in both (Base had content, now removed)
 			FMergeOperation Op = CreateOperation(EMergeOperationType::RemoveGraph, GraphName, TEXT(""));
 			OutOperations.Add(Op);
 		}
-		else if (BaseGraph.IsValid() && LocalGraph.IsValid() && RemoteGraph.IsValid())
+		else if (bBaseExists && !bBaseIsEmpty && LocalGraph.IsValid() && RemoteGraph.IsValid())
 		{
 			// Graph exists in all three - diff the contents
 			UE_LOG(LogTemp, Log, TEXT("DiffEngine: Function '%s' exists in all three versions - diffing contents"), *GraphName);

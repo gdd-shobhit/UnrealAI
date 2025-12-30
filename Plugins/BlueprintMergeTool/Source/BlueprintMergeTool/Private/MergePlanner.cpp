@@ -464,13 +464,25 @@ bool FMergePlanner::ApplyNonDestructiveResolution(
 				{
 					// For Graph/Function conflicts, we need to add the remote version of the graph
 					// But we MUST have the graph data to do this
-					UE_LOG(LogTemp, Log, TEXT("NonDestructive: Processing %s conflict '%s' - LocalValue: '%s', RemoteValue: '%s', RemoteData length: %d"), 
-						*Conflict.ConflictType, *Conflict.ElementName, *Conflict.LocalValue, *Conflict.RemoteValue, Conflict.RemoteData.Len());
+					UE_LOG(LogTemp, Log, TEXT("NonDestructive: Processing %s conflict '%s' - LocalValue: '%s', RemoteValue: '%s', RemoteData length: %d, LocalData length: %d"), 
+						*Conflict.ConflictType, *Conflict.ElementName, *Conflict.LocalValue, *Conflict.RemoteValue, Conflict.RemoteData.Len(), Conflict.LocalData.Len());
 					
-					if (Conflict.RemoteData.IsEmpty())
+					// Try RemoteData first, fall back to LocalData if RemoteData is empty
+					FString GraphDataToUse = Conflict.RemoteData;
+					FString SourceToUse = TEXT("Remote");
+					
+					if (GraphDataToUse.IsEmpty() && !Conflict.LocalData.IsEmpty())
 					{
-						UE_LOG(LogTemp, Warning, TEXT("NonDestructive: Cannot add remote version of conflicting %s '%s' - RemoteData is missing (length: %d). Conflict will require manual resolution."), 
-							*Conflict.ConflictType, *Conflict.ElementName, Conflict.RemoteData.Len());
+						UE_LOG(LogTemp, Warning, TEXT("NonDestructive: RemoteData is empty for %s '%s', using LocalData instead"), 
+							*Conflict.ConflictType, *Conflict.ElementName);
+						GraphDataToUse = Conflict.LocalData;
+						SourceToUse = TEXT("Local");
+					}
+					
+					if (GraphDataToUse.IsEmpty())
+					{
+						UE_LOG(LogTemp, Warning, TEXT("NonDestructive: Cannot add remote version of conflicting %s '%s' - both RemoteData and LocalData are missing. Conflict will require manual resolution."), 
+							*Conflict.ConflictType, *Conflict.ElementName);
 						// Don't create the operation if we don't have the data - this will leave it as unresolved
 						return false; // Let it be marked as unresolved for manual review
 					}
@@ -480,16 +492,28 @@ bool FMergePlanner::ApplyNonDestructiveResolution(
 					
 					// Create an AddGraph operation for the remote version
 					FMergeOperation RemoteGraphOp = FDiffEngine::CreateOperation(EMergeOperationType::AddGraph, RemoteGraphId, RemoteGraphId);
-					RemoteGraphOp.AdditionalData.Add(TEXT("Source"), TEXT("Remote"));
+					RemoteGraphOp.AdditionalData.Add(TEXT("Source"), SourceToUse);
 					RemoteGraphOp.AdditionalData.Add(TEXT("KeepBoth"), TEXT("true"));
 					RemoteGraphOp.AdditionalData.Add(TEXT("ConflictResolution"), TEXT("KeepBoth"));
 					RemoteGraphOp.AdditionalData.Add(TEXT("OriginalConflictId"), Conflict.ConflictId);
 					RemoteGraphOp.AdditionalData.Add(TEXT("ConflictType"), Conflict.ConflictType);
 					RemoteGraphOp.AdditionalData.Add(TEXT("ElementName"), Conflict.ElementName);
 					RemoteGraphOp.AdditionalData.Add(TEXT("RemoteValue"), Conflict.RemoteValue);
-					RemoteGraphOp.AdditionalData.Add(TEXT("GraphData"), Conflict.RemoteData); // Always add GraphData since we checked it's not empty
+					RemoteGraphOp.AdditionalData.Add(TEXT("GraphData"), GraphDataToUse); // Add GraphData - we've verified it's not empty
 					
-					UE_LOG(LogTemp, Log, TEXT("NonDestructive: Adding remote version of conflicting %s '%s' with actual graph data (GUID: %s)"), *Conflict.ConflictType, *Conflict.ElementName, *RemoteGraphId);
+					UE_LOG(LogTemp, Log, TEXT("NonDestructive: Adding %s version of conflicting %s '%s' with graph data (GUID: %s, Data length: %d)"), 
+						*SourceToUse, *Conflict.ConflictType, *Conflict.ElementName, *RemoteGraphId, GraphDataToUse.Len());
+					
+					// Verify GraphData was added
+					FString* VerifyGraphData = RemoteGraphOp.AdditionalData.Find(TEXT("GraphData"));
+					if (VerifyGraphData && !VerifyGraphData->IsEmpty())
+					{
+						UE_LOG(LogTemp, Log, TEXT("NonDestructive: Verified GraphData is present in operation (length: %d)"), VerifyGraphData->Len());
+					}
+					else
+					{
+						UE_LOG(LogTemp, Error, TEXT("NonDestructive: ERROR - GraphData was NOT added to operation!"));
+					}
 					
 					OutOperations.Add(RemoteGraphOp);
 					return true;
@@ -528,11 +552,54 @@ bool FMergePlanner::ApplyNonDestructiveResolution(
 			else
 			{
 				// Traditional non-destructive: prefer local by default
-				FMergeOperation Op = FDiffEngine::CreateOperation(OpType, Conflict.ConflictId, Conflict.ConflictId);
-				Op.AdditionalData.Add(TEXT("Source"), TEXT("Local"));
-				Op.AdditionalData.Add(TEXT("Reason"), TEXT("NonDestructiveDefault"));
-				OutOperations.Add(Op);
-				return true;
+				// For Graph/Function conflicts, we need to include GraphData
+				if (Conflict.ConflictType == TEXT("Graph") || Conflict.ConflictType == TEXT("Function"))
+				{
+					// For Graph/Function conflicts, create AddGraph with GraphData
+					FMergeOperation Op = FDiffEngine::CreateOperation(OpType, Conflict.ElementName, Conflict.ElementName);
+					Op.AdditionalData.Add(TEXT("Source"), TEXT("Local"));
+					Op.AdditionalData.Add(TEXT("Reason"), TEXT("NonDestructiveDefault"));
+					
+					// For conflict resolution when function already exists, use RemoteData to get missing nodes
+					// This ensures nodes that exist only in remote (like Print String) are included
+					FString GraphDataToUse = Conflict.RemoteData;
+					if (GraphDataToUse.IsEmpty() && !Conflict.LocalData.IsEmpty())
+					{
+						UE_LOG(LogTemp, Warning, TEXT("NonDestructive: RemoteData is empty for %s '%s', using LocalData instead"), 
+							*Conflict.ConflictType, *Conflict.ElementName);
+						GraphDataToUse = Conflict.LocalData;
+					}
+					else if (!GraphDataToUse.IsEmpty())
+					{
+						// Using RemoteData for conflict resolution
+						Op.AdditionalData.Add(TEXT("Source"), TEXT("Remote")); // Update source since we're using remote data
+						UE_LOG(LogTemp, Log, TEXT("NonDestructive: Using RemoteData for conflict resolution to include missing nodes from remote"));
+					}
+					
+					if (!GraphDataToUse.IsEmpty())
+					{
+						Op.AdditionalData.Add(TEXT("GraphData"), GraphDataToUse);
+						UE_LOG(LogTemp, Log, TEXT("NonDestructive: Adding GraphData for %s '%s' (length: %d)"), 
+							*Conflict.ConflictType, *Conflict.ElementName, GraphDataToUse.Len());
+					}
+					else
+					{
+						UE_LOG(LogTemp, Warning, TEXT("NonDestructive: No GraphData available for %s '%s' - operation may fail"), 
+							*Conflict.ConflictType, *Conflict.ElementName);
+					}
+					
+					OutOperations.Add(Op);
+					return true;
+				}
+				else
+				{
+					// For Node conflicts, use the original logic
+					FMergeOperation Op = FDiffEngine::CreateOperation(OpType, Conflict.ConflictId, Conflict.ConflictId);
+					Op.AdditionalData.Add(TEXT("Source"), TEXT("Local"));
+					Op.AdditionalData.Add(TEXT("Reason"), TEXT("NonDestructiveDefault"));
+					OutOperations.Add(Op);
+					return true;
+				}
 			}
 		}
 	}
@@ -565,6 +632,30 @@ bool FMergePlanner::ApplyStrategyResolution(
 			{
 				OpType = EMergeOperationType::UpdateComponent;
 			}
+			else if (Conflict.ConflictType == TEXT("Graph") || Conflict.ConflictType == TEXT("Function"))
+			{
+				// For Graph/Function conflicts, we need to create an AddGraph operation with the local graph data
+				OpType = EMergeOperationType::AddGraph;
+				FMergeOperation Op = FDiffEngine::CreateOperation(OpType, Conflict.ElementName, Conflict.ElementName);
+				Op.AdditionalData.Add(TEXT("Source"), TEXT("Local"));
+				Op.AdditionalData.Add(TEXT("Strategy"), TEXT("UseLocal"));
+				
+				// Include GraphData if available
+				if (!Conflict.LocalData.IsEmpty())
+				{
+					Op.AdditionalData.Add(TEXT("GraphData"), Conflict.LocalData);
+					UE_LOG(LogTemp, Log, TEXT("UseLocal: Adding GraphData for %s '%s' (length: %d)"), 
+						*Conflict.ConflictType, *Conflict.ElementName, Conflict.LocalData.Len());
+				}
+				else
+				{
+					UE_LOG(LogTemp, Warning, TEXT("UseLocal: No LocalData available for %s '%s' - operation may fail"), 
+						*Conflict.ConflictType, *Conflict.ElementName);
+				}
+				
+				OutOperations.Add(Op);
+				return true;
+			}
 
 			FMergeOperation Op = FDiffEngine::CreateOperation(OpType, TEXT(""), Conflict.ConflictId);
 			Op.AdditionalData.Add(TEXT("Source"), TEXT("Local"));
@@ -584,6 +675,30 @@ bool FMergePlanner::ApplyStrategyResolution(
 			else if (Conflict.ConflictType == TEXT("Component"))
 			{
 				OpType = EMergeOperationType::UpdateComponent;
+			}
+			else if (Conflict.ConflictType == TEXT("Graph") || Conflict.ConflictType == TEXT("Function"))
+			{
+				// For Graph/Function conflicts, we need to create an AddGraph operation with the remote graph data
+				OpType = EMergeOperationType::AddGraph;
+				FMergeOperation Op = FDiffEngine::CreateOperation(OpType, Conflict.ElementName, Conflict.ElementName);
+				Op.AdditionalData.Add(TEXT("Source"), TEXT("Remote"));
+				Op.AdditionalData.Add(TEXT("Strategy"), TEXT("UseRemote"));
+				
+				// Include GraphData if available
+				if (!Conflict.RemoteData.IsEmpty())
+				{
+					Op.AdditionalData.Add(TEXT("GraphData"), Conflict.RemoteData);
+					UE_LOG(LogTemp, Log, TEXT("UseRemote: Adding GraphData for %s '%s' (length: %d)"), 
+						*Conflict.ConflictType, *Conflict.ElementName, Conflict.RemoteData.Len());
+				}
+				else
+				{
+					UE_LOG(LogTemp, Warning, TEXT("UseRemote: No RemoteData available for %s '%s' - operation may fail"), 
+						*Conflict.ConflictType, *Conflict.ElementName);
+				}
+				
+				OutOperations.Add(Op);
+				return true;
 			}
 
 			FMergeOperation Op = FDiffEngine::CreateOperation(OpType, TEXT(""), Conflict.ConflictId);

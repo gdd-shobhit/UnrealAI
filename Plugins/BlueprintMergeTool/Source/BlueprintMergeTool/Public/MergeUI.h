@@ -81,6 +81,12 @@ private:
 	UBlueprint* LoadBlueprintFromPath(const FString& Path);
 	TSharedRef<SWidget> CreateBlueprintAssetList(FString& OutSelectedPath, bool& bAssetSelected);
 	
+	// Combo box helpers
+	void PopulateBlueprintOptions();
+	void OnBaseBlueprintSelected(TSharedPtr<FString> NewSelection, ESelectInfo::Type SelectInfo);
+	void OnLocalBlueprintSelected(TSharedPtr<FString> NewSelection, ESelectInfo::Type SelectInfo);
+	void OnRemoteBlueprintSelected(TSharedPtr<FString> NewSelection, ESelectInfo::Type SelectInfo);
+	
 	// Blueprint reference management
 	void ClearAllBlueprintReferences();
 
@@ -119,4 +125,11 @@ private:
 	// Perforce integration state
 	TArray<FString> ConflictedBlueprints;
 	FString SelectedConflictedBlueprint;
+
+	// Combo box options and selections
+	TArray<TSharedPtr<FString>> BlueprintOptions;
+	TMap<FString, FString> BlueprintNameToPathMap; // Maps blueprint name to asset path
+	TSharedPtr<FString> SelectedBaseBlueprint;
+	TSharedPtr<FString> SelectedLocalBlueprint;
+	TSharedPtr<FString> SelectedRemoteBlueprint;
 };

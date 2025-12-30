@@ -38,6 +38,14 @@ void SMergeUI::Construct(const FArguments& InArgs)
 	LocalPathText = MakeShareable(new FString(TEXT("No local Blueprint selected")));
 	RemotePathText = MakeShareable(new FString(TEXT("No remote Blueprint selected")));
 
+	// Initialize combo box options
+	BlueprintOptions.Empty();
+	BlueprintOptions.Add(MakeShareable(new FString(TEXT("Select a Blueprint..."))));
+	SelectedBaseBlueprint = BlueprintOptions[0];
+	SelectedLocalBlueprint = BlueprintOptions[0];
+	SelectedRemoteBlueprint = BlueprintOptions[0];
+	PopulateBlueprintOptions();
+
 	// Initialize state
 	bDiffPerformed = false;
 	bMergePlanCreated = false;
@@ -189,23 +197,11 @@ TSharedRef<SWidget> SMergeUI::CreateFileSelectionSection()
 			+ SHorizontalBox::Slot()
 			.FillWidth(1.0f)
 			.VAlign(VAlign_Center)
-			.Padding(0, 0, 10, 0)
 			[
-				SNew(STextBlock)
-				.Text_Lambda([this]() -> FText
-				{
-					return FText::FromString(*BasePathText);
-				})
-				.Font(FCoreStyle::GetDefaultFontStyle("Normal", 10))
-				.ColorAndOpacity(FLinearColor(0.7f, 0.7f, 0.7f, 1.0f))
-			]
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			[
-				SNew(SButton)
-				.Text(FText::FromString(TEXT("Select Base")))
-				.OnClicked(this, &SMergeUI::OnLoadBaseBlueprint)
+				SNew(STextComboBox)
+				.OptionsSource(&BlueprintOptions)
+				.InitiallySelectedItem(SelectedBaseBlueprint)
+				.OnSelectionChanged(this, &SMergeUI::OnBaseBlueprintSelected)
 			]
 		]
 
@@ -230,23 +226,11 @@ TSharedRef<SWidget> SMergeUI::CreateFileSelectionSection()
 			+ SHorizontalBox::Slot()
 			.FillWidth(1.0f)
 			.VAlign(VAlign_Center)
-			.Padding(0, 0, 10, 0)
 			[
-				SNew(STextBlock)
-				.Text_Lambda([this]() -> FText
-				{
-					return FText::FromString(*LocalPathText);
-				})
-				.Font(FCoreStyle::GetDefaultFontStyle("Normal", 10))
-				.ColorAndOpacity(FLinearColor(0.7f, 0.7f, 0.7f, 1.0f))
-			]
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			[
-				SNew(SButton)
-				.Text(FText::FromString(TEXT("Select Local")))
-				.OnClicked(this, &SMergeUI::OnLoadLocalBlueprint)
+				SNew(STextComboBox)
+				.OptionsSource(&BlueprintOptions)
+				.InitiallySelectedItem(SelectedLocalBlueprint)
+				.OnSelectionChanged(this, &SMergeUI::OnLocalBlueprintSelected)
 			]
 		]
 
@@ -271,23 +255,11 @@ TSharedRef<SWidget> SMergeUI::CreateFileSelectionSection()
 			+ SHorizontalBox::Slot()
 			.FillWidth(1.0f)
 			.VAlign(VAlign_Center)
-			.Padding(0, 0, 10, 0)
 			[
-				SNew(STextBlock)
-				.Text_Lambda([this]() -> FText
-				{
-					return FText::FromString(*RemotePathText);
-				})
-				.Font(FCoreStyle::GetDefaultFontStyle("Normal", 10))
-				.ColorAndOpacity(FLinearColor(0.7f, 0.7f, 0.7f, 1.0f))
-			]
-
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			[
-				SNew(SButton)
-				.Text(FText::FromString(TEXT("Select Remote")))
-				.OnClicked(this, &SMergeUI::OnLoadRemoteBlueprint)
+				SNew(STextComboBox)
+				.OptionsSource(&BlueprintOptions)
+				.InitiallySelectedItem(SelectedRemoteBlueprint)
+				.OnSelectionChanged(this, &SMergeUI::OnRemoteBlueprintSelected)
 			]
 		]
 
@@ -706,11 +678,26 @@ TSharedRef<SWidget> SMergeUI::CreateActionButtonsSection()
 			.Padding(0, 0, 15, 0)
 			[
 				SNew(SButton)
-				.Text(FText::FromString(TEXT("✅ Apply Merge")))
+				.Text_Lambda([this]() -> FText
+				{
+					if (bHasUnresolvedConflicts)
+					{
+						return FText::FromString(TEXT("⚠️ Apply Merge (Has Conflicts)"));
+					}
+					return FText::FromString(TEXT("✅ Apply Merge"));
+				})
 				.OnClicked(this, &SMergeUI::OnApplyMerge)
 				.IsEnabled_Lambda([this]() -> bool
 				{
-					return bMergePlanCreated && !bHasUnresolvedConflicts;
+					return bMergePlanCreated; // Allow applying even with conflicts (user will be warned)
+				})
+				.ToolTipText_Lambda([this]() -> FText
+				{
+					if (bHasUnresolvedConflicts)
+					{
+						return FText::FromString(TEXT("Apply merge with unresolved conflicts. You will be warned before proceeding."));
+					}
+					return FText::FromString(TEXT("Apply the merge plan to the selected Blueprint"));
 				})
 			]
 
@@ -986,20 +973,29 @@ FReply SMergeUI::OnApplyMerge()
 	}
 
 	// Ask which Blueprint to apply to
+	// NOTE: Base should NEVER be modified - it's the common ancestor for 3-way merge
 	EAppReturnType::Type Target = FMessageDialog::Open(EAppMsgType::YesNoCancel,
-		FText::FromString(TEXT("Which Blueprint should receive the merged changes?\n\nYes = Local Blueprint\nNo = Remote Blueprint\nCancel = Abort")));
+		FText::FromString(TEXT("Which Blueprint should receive the merged changes?\n\nYes = Local Blueprint (recommended)\nNo = Remote Blueprint\nCancel = Abort\n\n⚠ Base Blueprint will NEVER be modified")));
 
 	UBlueprint* TargetBlueprint = nullptr;
+	FString TargetBlueprintName;
 	if (Target == EAppReturnType::Yes)
 	{
 		TargetBlueprint = LocalBlueprint.Get();
+		TargetBlueprintName = TEXT("Local");
+		UE_LOG(LogTemp, Log, TEXT("MergeUI: User selected LOCAL Blueprint as merge target: %s"), 
+			TargetBlueprint ? *TargetBlueprint->GetName() : TEXT("NULL"));
 	}
 	else if (Target == EAppReturnType::No)
 	{
 		TargetBlueprint = RemoteBlueprint.Get();
+		TargetBlueprintName = TEXT("Remote");
+		UE_LOG(LogTemp, Log, TEXT("MergeUI: User selected REMOTE Blueprint as merge target: %s"), 
+			TargetBlueprint ? *TargetBlueprint->GetName() : TEXT("NULL"));
 	}
 	else
 	{
+		UE_LOG(LogTemp, Log, TEXT("MergeUI: User cancelled merge application"));
 		return FReply::Handled(); // Cancelled
 	}
 
@@ -1009,7 +1005,21 @@ FReply SMergeUI::OnApplyMerge()
 		return FReply::Handled();
 	}
 
-	*StatusMessage = TEXT("Applying merge operations...");
+	// Safety check: NEVER allow Base to be modified
+	if (BaseBlueprint.IsValid() && TargetBlueprint == BaseBlueprint.Get())
+	{
+		FMessageDialog::Open(EAppMsgType::Ok, 
+			FText::FromString(TEXT("ERROR: Cannot modify Base Blueprint!\n\nBase is the common ancestor and must remain unchanged.\nPlease select Local or Remote instead.")));
+		UE_LOG(LogTemp, Error, TEXT("MergeUI: BLOCKED attempt to modify Base Blueprint!"));
+		return FReply::Handled();
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("MergeUI: Applying merge to %s Blueprint: %s (Path: %s)"), 
+		*TargetBlueprintName, 
+		*TargetBlueprint->GetName(),
+		*TargetBlueprint->GetPathName());
+
+	*StatusMessage = FString::Printf(TEXT("Applying merge operations to %s Blueprint..."), *TargetBlueprintName);
 
 	// Apply the merge
 	FApplyResult ApplyResult;
@@ -1493,6 +1503,206 @@ UBlueprint* SMergeUI::LoadBlueprintFromPath(const FString& Path)
 	return nullptr;
 }
 
+void SMergeUI::PopulateBlueprintOptions()
+{
+	// Clear existing options (except the placeholder)
+	BlueprintOptions.Empty();
+	BlueprintOptions.Add(MakeShareable(new FString(TEXT("Select a Blueprint..."))));
+	BlueprintNameToPathMap.Empty();
+	
+	// Get all Blueprint assets from the project
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+	
+	FARFilter Filter;
+	Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
+	Filter.bRecursiveClasses = true;
+	
+	TArray<FAssetData> BlueprintAssets;
+	AssetRegistry.GetAssets(Filter, BlueprintAssets);
+	
+	// Add all found blueprints to the options
+	for (const FAssetData& AssetData : BlueprintAssets)
+	{
+		FString AssetName = AssetData.AssetName.ToString();
+		FString AssetPath = AssetData.GetObjectPathString();
+		
+		// Store the name in the combo box options
+		BlueprintOptions.Add(MakeShareable(new FString(AssetName)));
+		// Store the mapping from name to path
+		BlueprintNameToPathMap.Add(AssetName, AssetPath);
+	}
+	
+	UE_LOG(LogTemp, Log, TEXT("Populated %d Blueprint options"), BlueprintOptions.Num() - 1);
+}
+
+void SMergeUI::OnBaseBlueprintSelected(TSharedPtr<FString> NewSelection, ESelectInfo::Type SelectInfo)
+{
+	if (!NewSelection.IsValid() || NewSelection == BlueprintOptions[0])
+	{
+		return; // Don't process the placeholder option
+	}
+	
+	SelectedBaseBlueprint = NewSelection;
+	
+	// Get the asset path from the name
+	FString AssetName = *NewSelection;
+	FString* AssetPathPtr = BlueprintNameToPathMap.Find(AssetName);
+	if (!AssetPathPtr)
+	{
+		*StatusMessage = TEXT("Failed to find Blueprint path");
+		SelectedBaseBlueprint = BlueprintOptions[0]; // Reset to placeholder
+		return;
+	}
+	
+	FString AssetPath = *AssetPathPtr;
+	UBlueprint* Blueprint = LoadBlueprintFromPath(AssetPath);
+	if (Blueprint && IsValid(Blueprint))
+	{
+		// Clear any existing reference first
+		BaseBlueprint.Reset();
+		
+		BaseBlueprint = Blueprint;
+		*BasePathText = FString::Printf(TEXT("Base: %s"), *GetBlueprintDisplayName(Blueprint));
+		*StatusMessage = TEXT("Base Blueprint loaded");
+		
+		// Create snapshot with error handling
+		try
+		{
+			if (FSnapshotManager::CreateSnapshot(Blueprint, BaseSnapshot))
+			{
+				UE_LOG(LogTemp, Log, TEXT("Base Blueprint snapshot created"));
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("Failed to create Base Blueprint snapshot"));
+				*StatusMessage = TEXT("Base Blueprint loaded but snapshot failed");
+			}
+		}
+		catch (...)
+		{
+			UE_LOG(LogTemp, Error, TEXT("Exception occurred while creating Base Blueprint snapshot"));
+			*StatusMessage = TEXT("Base Blueprint loaded but snapshot failed");
+		}
+	}
+	else
+	{
+		*StatusMessage = TEXT("Failed to load Base Blueprint");
+		SelectedBaseBlueprint = BlueprintOptions[0]; // Reset to placeholder
+	}
+}
+
+void SMergeUI::OnLocalBlueprintSelected(TSharedPtr<FString> NewSelection, ESelectInfo::Type SelectInfo)
+{
+	if (!NewSelection.IsValid() || NewSelection == BlueprintOptions[0])
+	{
+		return; // Don't process the placeholder option
+	}
+	
+	SelectedLocalBlueprint = NewSelection;
+	
+	// Get the asset path from the name
+	FString AssetName = *NewSelection;
+	FString* AssetPathPtr = BlueprintNameToPathMap.Find(AssetName);
+	if (!AssetPathPtr)
+	{
+		*StatusMessage = TEXT("Failed to find Blueprint path");
+		SelectedLocalBlueprint = BlueprintOptions[0]; // Reset to placeholder
+		return;
+	}
+	
+	FString AssetPath = *AssetPathPtr;
+	UBlueprint* Blueprint = LoadBlueprintFromPath(AssetPath);
+	if (Blueprint && IsValid(Blueprint))
+	{
+		// Clear any existing reference first
+		LocalBlueprint.Reset();
+		
+		LocalBlueprint = Blueprint;
+		*LocalPathText = FString::Printf(TEXT("Local: %s"), *GetBlueprintDisplayName(Blueprint));
+		*StatusMessage = TEXT("Local Blueprint loaded");
+
+		// Create snapshot with error handling
+		try
+		{
+			if (FSnapshotManager::CreateSnapshot(Blueprint, LocalSnapshot))
+			{
+				UE_LOG(LogTemp, Log, TEXT("Local Blueprint snapshot created"));
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("Failed to create Local Blueprint snapshot"));
+				*StatusMessage = TEXT("Local Blueprint loaded but snapshot failed");
+			}
+		}
+		catch (...)
+		{
+			UE_LOG(LogTemp, Error, TEXT("Exception occurred while creating Local Blueprint snapshot"));
+			*StatusMessage = TEXT("Local Blueprint loaded but snapshot failed");
+		}
+	}
+	else
+	{
+		*StatusMessage = TEXT("Failed to load Local Blueprint");
+		SelectedLocalBlueprint = BlueprintOptions[0]; // Reset to placeholder
+	}
+}
+
+void SMergeUI::OnRemoteBlueprintSelected(TSharedPtr<FString> NewSelection, ESelectInfo::Type SelectInfo)
+{
+	if (!NewSelection.IsValid() || NewSelection == BlueprintOptions[0])
+	{
+		return; // Don't process the placeholder option
+	}
+	
+	SelectedRemoteBlueprint = NewSelection;
+	
+	// Get the asset path from the name
+	FString AssetName = *NewSelection;
+	FString* AssetPathPtr = BlueprintNameToPathMap.Find(AssetName);
+	if (!AssetPathPtr)
+	{
+		*StatusMessage = TEXT("Failed to find Blueprint path");
+		SelectedRemoteBlueprint = BlueprintOptions[0]; // Reset to placeholder
+		return;
+	}
+	
+	FString AssetPath = *AssetPathPtr;
+	UBlueprint* Blueprint = LoadBlueprintFromPath(AssetPath);
+	if (Blueprint && IsValid(Blueprint))
+	{
+		// Clear any existing reference first
+		RemoteBlueprint.Reset();
+		
+		RemoteBlueprint = Blueprint;
+		*RemotePathText = FString::Printf(TEXT("Remote: %s"), *GetBlueprintDisplayName(Blueprint));
+		*StatusMessage = TEXT("Remote Blueprint loaded");
+
+		// Create snapshot with error handling
+		try
+		{
+			if (FSnapshotManager::CreateSnapshot(Blueprint, RemoteSnapshot))
+			{
+				UE_LOG(LogTemp, Log, TEXT("Remote Blueprint snapshot created"));
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("Failed to create Remote Blueprint snapshot"));
+				*StatusMessage = TEXT("Remote Blueprint loaded but snapshot failed");
+			}
+		}
+		catch (...)
+		{
+			UE_LOG(LogTemp, Error, TEXT("Exception occurred while creating Remote Blueprint snapshot"));
+			*StatusMessage = TEXT("Remote Blueprint loaded but snapshot failed");
+		}
+	}
+	else
+	{
+		*StatusMessage = TEXT("Failed to load Remote Blueprint");
+		SelectedRemoteBlueprint = BlueprintOptions[0]; // Reset to placeholder
+	}
+}
 
 void SMergeUI::ClearAllBlueprintReferences()
 {
@@ -1514,9 +1724,17 @@ void SMergeUI::ClearAllBlueprintReferences()
 	bHasUnresolvedConflicts = false;
 	
 	// Clear path text
-	*BasePathText = TEXT("Base: Not Selected");
-	*LocalPathText = TEXT("Local: Not Selected");
-	*RemotePathText = TEXT("Remote: Not Selected");
+	*BasePathText = TEXT("No base Blueprint selected");
+	*LocalPathText = TEXT("No local Blueprint selected");
+	*RemotePathText = TEXT("No remote Blueprint selected");
+	
+	// Reset combo box selections
+	if (BlueprintOptions.Num() > 0)
+	{
+		SelectedBaseBlueprint = BlueprintOptions[0];
+		SelectedLocalBlueprint = BlueprintOptions[0];
+		SelectedRemoteBlueprint = BlueprintOptions[0];
+	}
 	
 	// Clear status
 	*StatusMessage = TEXT("All references cleared. Please reload Blueprints after renaming.");

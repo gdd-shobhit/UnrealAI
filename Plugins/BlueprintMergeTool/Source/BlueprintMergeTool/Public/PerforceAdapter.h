@@ -210,5 +210,15 @@ private:
 	 * @return Temporary directory path
 	 */
 	static FString GetTempDirectory();
+
+	/**
+	 * Fetch a specific version from Perforce and save to temp file
+	 * @param FilePath Absolute file path
+	 * @param Version Version to fetch (BASE, HEAD, etc.)
+	 * @param OutVersionFilePath Output path to fetched file
+	 * @param OutError Error message if failed
+	 * @return True if fetch successful
+	 */
+	static bool FetchVersionFromPerforce(const FString& FilePath, const FString& Version, FString& OutVersionFilePath, FString& OutError);
 };
 

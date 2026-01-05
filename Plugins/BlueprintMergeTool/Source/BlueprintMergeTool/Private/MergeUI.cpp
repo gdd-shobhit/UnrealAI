@@ -25,6 +25,8 @@
 #include "HAL/PlatformProcess.h"
 #include "Widgets/Input/STextComboBox.h"
 #include "UObject/SavePackage.h"
+#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFile.h"
 
 void SMergeUI::Construct(const FArguments& InArgs)
 {
@@ -347,7 +349,7 @@ TSharedRef<SWidget> SMergeUI::CreatePerforceSection()
 				}
 				else
 				{
-					return FText::FromString(TEXT("⚠ Perforce is not configured. Manual Blueprint selection is still available below."));
+					return FText::FromString(TEXT("⚠ Perforce is not configured.\nTo enable: 1) Edit → Plugins → Enable 'Perforce Source Control', 2) Toolbar → Source Control → Connect to Source Control → Select Perforce\nManual Blueprint selection is still available below."));
 				}
 			})
 			.Font(FCoreStyle::GetDefaultFontStyle("Normal", 10))
@@ -1020,6 +1022,35 @@ FReply SMergeUI::OnApplyMerge()
 		*TargetBlueprint->GetPathName());
 
 	*StatusMessage = FString::Printf(TEXT("Applying merge operations to %s Blueprint..."), *TargetBlueprintName);
+
+	// If this is a Perforce-managed file, ensure it's checked out before applying merge
+	if (!SelectedConflictedBlueprint.IsEmpty() && FPerforceAdapter::IsPerforceAvailable())
+	{
+		FString FilePath = FPerforceAdapter::AssetPathToFilePath(TargetBlueprint->GetPathName());
+		if (!FilePath.IsEmpty())
+		{
+			bool bIsCheckedOut = false;
+			bool bIsConflicted = false;
+			if (FPerforceAdapter::GetFileState(FilePath, bIsConflicted, bIsCheckedOut))
+			{
+				if (!bIsCheckedOut)
+				{
+					*StatusMessage = TEXT("Checking out file in Perforce...");
+					FString CheckoutError;
+					if (!FPerforceAdapter::CheckoutFile(FilePath, CheckoutError))
+					{
+						FMessageDialog::Open(EAppMsgType::Ok, 
+							FText::FromString(FString::Printf(TEXT("Failed to checkout file in Perforce:\n\n%s\n\nMerge will continue, but you may need to manually checkout the file."), *CheckoutError)));
+						UE_LOG(LogTemp, Warning, TEXT("MergeUI: Failed to checkout file: %s"), *CheckoutError);
+					}
+					else
+					{
+						UE_LOG(LogTemp, Log, TEXT("MergeUI: Successfully checked out file: %s"), *FilePath);
+					}
+				}
+			}
+		}
+	}
 
 	// Apply the merge
 	FApplyResult ApplyResult;
@@ -1775,70 +1806,95 @@ FReply SMergeUI::OnDetectPerforceConflicts()
 		FString SelectedBlueprint;
 		bool bBlueprintSelected = false;
 		
+		// Create options array for combo box
+		TArray<TSharedPtr<FString>> ConflictOptions;
+		for (const FString& BlueprintPath : ConflictedBlueprints)
+		{
+			ConflictOptions.Add(MakeShareable(new FString(BlueprintPath)));
+		}
+		TSharedPtr<FString> SelectedOption = ConflictOptions.Num() > 0 ? ConflictOptions[0] : nullptr;
+		
 		// Create a dialog window for selecting conflicted Blueprint
 		TSharedRef<SWindow> ConflictPickerWindow = SNew(SWindow)
 			.Title(FText::FromString(TEXT("Select Conflicted Blueprint")))
-			.ClientSize(FVector2D(600, 400))
+			.ClientSize(FVector2D(600, 200))
 			.SupportsMaximize(false)
 			.SupportsMinimize(false);
 
-		TSharedRef<SVerticalBox> ConflictListBox = SNew(SVerticalBox);
+		TSharedRef<SVerticalBox> ConflictPickerContent = SNew(SVerticalBox)
 		
-		for (const FString& BlueprintPath : ConflictedBlueprints)
-		{
-			ConflictListBox->AddSlot()
-				.AutoHeight()
-				.Padding(2)
-				[
-					SNew(SButton)
-					.Text(FText::FromString(BlueprintPath))
-					.HAlign(HAlign_Left)
-					.OnClicked_Lambda([&SelectedBlueprint, &bBlueprintSelected, BlueprintPath, ConflictPickerWindow]() -> FReply
-					{
-						SelectedBlueprint = BlueprintPath;
-						bBlueprintSelected = true;
-						ConflictPickerWindow->RequestDestroyWindow();
-						return FReply::Handled();
-					})
-				];
-		}
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(10)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(FString::Printf(TEXT("Found %d conflicted Blueprint(s). Select one to merge:"), ConflictCount)))
+			.Font(FCoreStyle::GetDefaultFontStyle("Normal", 12))
+		]
 		
-		TSharedRef<SWidget> ConflictPickerContent = SNew(SVerticalBox)
-			+ SVerticalBox::Slot()
-			.FillHeight(1.0f)
-			.Padding(10)
-			[
-				SNew(SBorder)
-				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-				.Padding(5)
-				[
-					SNew(SScrollBox)
-					+ SScrollBox::Slot()
-					[
-						ConflictListBox
-					]
-				]
-			]
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(10)
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(10)
+		[
+			SNew(STextComboBox)
+			.OptionsSource(&ConflictOptions)
+			.InitiallySelectedItem(SelectedOption)
+			.OnSelectionChanged_Lambda([&SelectedOption](TSharedPtr<FString> NewSelection, ESelectInfo::Type SelectInfo)
+			{
+				SelectedOption = NewSelection;
+			})
+		]
+		
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(10)
+		.HAlign(HAlign_Right)
+		[
+			SNew(SHorizontalBox)
+			
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.Padding(5, 0)
 			[
 				SNew(SButton)
 				.Text(FText::FromString(TEXT("Cancel")))
-				.HAlign(HAlign_Center)
 				.OnClicked_Lambda([ConflictPickerWindow]() -> FReply
 				{
 					ConflictPickerWindow->RequestDestroyWindow();
 					return FReply::Handled();
 				})
-			];
-
+			]
+			
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.Padding(5, 0)
+			[
+				SNew(SButton)
+				.Text(FText::FromString(TEXT("Select")))
+				.OnClicked_Lambda([&SelectedBlueprint, &bBlueprintSelected, &SelectedOption, ConflictPickerWindow]() -> FReply
+				{
+					if (SelectedOption.IsValid() && SelectedOption->IsValid())
+					{
+						SelectedBlueprint = **SelectedOption;
+						bBlueprintSelected = true;
+					}
+					ConflictPickerWindow->RequestDestroyWindow();
+					return FReply::Handled();
+				})
+			]
+		];
+		
 		ConflictPickerWindow->SetContent(ConflictPickerContent);
 		FSlateApplication::Get().AddModalWindow(ConflictPickerWindow, nullptr);
 
 		if (bBlueprintSelected && !SelectedBlueprint.IsEmpty())
 		{
 			OnConflictedBlueprintSelected(SelectedBlueprint);
+			
+			// Automatically load all versions from Perforce after selection
+			// This makes the workflow smoother - user can go straight to "Perform Diff"
+			UE_LOG(LogTemp, Log, TEXT("Auto-loading versions for selected Blueprint: %s"), *SelectedBlueprint);
+			OnLoadFromPerforce();
 		}
 		
 		UE_LOG(LogTemp, Log, TEXT("Found %d conflicted Blueprints"), ConflictCount);
@@ -1863,6 +1919,25 @@ FReply SMergeUI::OnLoadFromPerforce()
 	}
 
 	*StatusMessage = TEXT("Loading Blueprint versions from Perforce...");
+	
+	UE_LOG(LogTemp, Log, TEXT("MergeUI: Loading all versions for conflicted Blueprint: %s"), *SelectedConflictedBlueprint);
+	
+	// Get file path for logging
+	FString FilePath = FPerforceAdapter::AssetPathToFilePath(SelectedConflictedBlueprint);
+	if (!FilePath.IsEmpty())
+	{
+		UE_LOG(LogTemp, Log, TEXT("MergeUI: File path: %s"), *FilePath);
+		
+		// Check if conflict files exist
+		IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+		FString BaseFile = FilePath + TEXT(".BASE");
+		FString TheirsFile = FilePath + TEXT(".THEIRS");
+		
+		UE_LOG(LogTemp, Log, TEXT("MergeUI: Checking for conflict files:"));
+		UE_LOG(LogTemp, Log, TEXT("  BASE (.BASE): %s - %s"), *BaseFile, PlatformFile.FileExists(*BaseFile) ? TEXT("EXISTS") : TEXT("NOT FOUND"));
+		UE_LOG(LogTemp, Log, TEXT("  REMOTE (.THEIRS): %s - %s"), *TheirsFile, PlatformFile.FileExists(*TheirsFile) ? TEXT("EXISTS") : TEXT("NOT FOUND"));
+		UE_LOG(LogTemp, Log, TEXT("  LOCAL (main file): %s - %s"), *FilePath, PlatformFile.FileExists(*FilePath) ? TEXT("EXISTS") : TEXT("NOT FOUND"));
+	}
 
 	UBlueprint* BaseBP = nullptr;
 	UBlueprint* LocalBP = nullptr;

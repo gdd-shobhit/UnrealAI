@@ -220,5 +220,16 @@ private:
 	 * @return True if fetch successful
 	 */
 	static bool FetchVersionFromPerforce(const FString& FilePath, const FString& Version, FString& OutVersionFilePath, FString& OutError);
+
+	/**
+	 * Copy a temp version file to a loadable path under Content so we can load it via asset path.
+	 * Used when version file is in Saved/BlueprintMergeTool/TempVersions (not under Content).
+	 * @param TempVersionFilePath Path to file in temp (e.g. from FetchVersionFromPerforce)
+	 * @param Version Version name (BASE or REMOTE)
+	 * @param OutLoadableFilePath Output path under Content (e.g. .../Content/BlueprintMergeToolTemp/MergeBase.uasset)
+	 * @param OutError Error message if failed
+	 * @return True if copy successful
+	 */
+	static bool CopyTempVersionToLoadablePath(const FString& TempVersionFilePath, const FString& Version, FString& OutLoadableFilePath, FString& OutError);
 };
 

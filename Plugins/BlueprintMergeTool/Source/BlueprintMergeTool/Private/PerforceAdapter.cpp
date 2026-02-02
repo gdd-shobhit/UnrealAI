@@ -12,12 +12,15 @@
 #include "ObjectTools.h"
 #include "SnapshotManager.h"
 #include "Misc/ConfigCacheIni.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/Package.h"
+#include "Engine/Blueprint.h"
 
 bool FPerforceAdapter::IsPerforceAvailable()
 {
 	ISourceControlModule& SourceControlModule = ISourceControlModule::Get();
 	ISourceControlProvider& Provider = SourceControlModule.GetProvider();
-	
+
 	if (!Provider.IsEnabled())
 	{
 		return false;
@@ -94,16 +97,16 @@ bool FPerforceAdapter::HasPerforceConflicts(const FString& BlueprintPath, FStrin
 	}
 
 	bool bIsConflicted = FileState->IsConflicted();
-	
+
 	// Fallback: Check for conflict marker files (.BASE, .THEIRS, .orig)
 	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
 	FString BaseFilePath = FilePath + TEXT(".BASE");
 	FString TheirsFilePath = FilePath + TEXT(".THEIRS");
 	FString OrigFilePath = FilePath + TEXT(".orig");
-	
-	bool bHasConflictMarkers = PlatformFile.FileExists(*BaseFilePath) || 
-	                           PlatformFile.FileExists(*TheirsFilePath) || 
-	                           PlatformFile.FileExists(*OrigFilePath);
+
+	bool bHasConflictMarkers = PlatformFile.FileExists(*BaseFilePath) ||
+		PlatformFile.FileExists(*TheirsFilePath) ||
+		PlatformFile.FileExists(*OrigFilePath);
 
 	if (bIsConflicted || bHasConflictMarkers)
 	{
@@ -230,12 +233,12 @@ bool FPerforceAdapter::CheckoutFile(const FString& FilePath, FString& OutError)
 	// Use provider's Execute method with CheckOut operation
 	TSharedRef<FCheckOut, ESPMode::ThreadSafe> CheckOutOp = ISourceControlOperation::Create<FCheckOut>();
 	ECommandResult::Type Result = Provider->Execute(CheckOutOp, TArray<FString>{FilePath}, EConcurrency::Synchronous);
-	
+
 	if (Result == ECommandResult::Succeeded)
 	{
 		return true;
 	}
-	
+
 	OutError = TEXT("Checkout failed");
 	return false;
 }
@@ -258,12 +261,12 @@ bool FPerforceAdapter::ResolveConflict(const FString& FilePath, EPerforceResolve
 	// Use provider's Execute method with Resolve operation
 	TSharedRef<FResolve, ESPMode::ThreadSafe> ResolveOp = ISourceControlOperation::Create<FResolve>();
 	ECommandResult::Type Result = Provider->Execute(ResolveOp, TArray<FString>{FilePath}, EConcurrency::Synchronous);
-	
+
 	if (Result == ECommandResult::Succeeded)
 	{
 		return true;
 	}
-	
+
 	OutError = TEXT("Resolve failed");
 	return false;
 }
@@ -287,12 +290,12 @@ bool FPerforceAdapter::SubmitFiles(const TArray<FString>& FilePaths, const FStri
 	TSharedRef<FCheckIn, ESPMode::ThreadSafe> CheckInOp = ISourceControlOperation::Create<FCheckIn>();
 	CheckInOp->SetDescription(FText::FromString(Description));
 	ECommandResult::Type Result = Provider->Execute(CheckInOp, FilePaths, EConcurrency::Synchronous);
-	
+
 	if (Result == ECommandResult::Succeeded)
 	{
 		return true;
 	}
-	
+
 	OutError = TEXT("Submit failed");
 	return false;
 }
@@ -320,19 +323,20 @@ int32 FPerforceAdapter::DetectConflictedBlueprints(TArray<FString>& OutConflicte
 	// This is more efficient than scanning all Blueprints through the asset registry
 	FString ContentDir = FPaths::ProjectContentDir();
 	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
-	
+
 	TArray<FString> UAssetFiles;
-	
+
 	// Recursively find all .uasset files in Content directory
 	// Helper function to recursively search directories
 	struct FDirectorySearcher
 	{
 		IPlatformFile& FileManager;
 		TArray<FString>& OutFiles;
-		
+
 		FDirectorySearcher(IPlatformFile& InFileManager, TArray<FString>& InOutFiles)
-			: FileManager(InFileManager), OutFiles(InOutFiles) {}
-		
+			: FileManager(InFileManager), OutFiles(InOutFiles) {
+		}
+
 		void SearchDirectory(const FString& Directory)
 		{
 			FileManager.IterateDirectory(*Directory, [this](const TCHAR* Filename, bool bIsDirectory) -> bool
@@ -350,10 +354,10 @@ int32 FPerforceAdapter::DetectConflictedBlueprints(TArray<FString>& OutConflicte
 			});
 		}
 	};
-	
+
 	FDirectorySearcher Searcher(PlatformFile, UAssetFiles);
 	Searcher.SearchDirectory(ContentDir);
-	
+
 	UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Found %d .uasset files in Content directory"), UAssetFiles.Num());
 
 	int32 CheckedCount = 0;
@@ -362,7 +366,7 @@ int32 FPerforceAdapter::DetectConflictedBlueprints(TArray<FString>& OutConflicte
 
 	// OPTIMIZATION: Use cached state first for fast filtering, only force update for potential conflicts
 	// This is much faster than ForceUpdate for every file
-	
+
 	// First pass: Quick scan using cached state to find potential conflicts
 	TArray<FString> PotentialConflicts;
 	for (const FString& FilePath : UAssetFiles)
@@ -371,7 +375,7 @@ int32 FPerforceAdapter::DetectConflictedBlueprints(TArray<FString>& OutConflicte
 
 		// Use cached state first - this is much faster
 		FSourceControlStatePtr FileState = Provider->GetState(FilePath, EStateCacheUsage::Use);
-		
+
 		if (!FileState.IsValid())
 		{
 			continue; // Skip files that Perforce doesn't know about
@@ -388,47 +392,47 @@ int32 FPerforceAdapter::DetectConflictedBlueprints(TArray<FString>& OutConflicte
 		// Quick check: Use cached state to see if it might be conflicted
 		bool bIsConflicted = FileState->IsConflicted();
 		bool bIsCheckedOut = FileState->IsCheckedOut();
-		
+
 		// Also check for conflict marker files (fast file system check)
 		bool bHasConflictMarkers = false;
 		FString BaseFilePath = FilePath + TEXT(".BASE");
 		FString TheirsFilePath = FilePath + TEXT(".THEIRS");
 		FString OrigFilePath = FilePath + TEXT(".orig");
-		
-		if (PlatformFile.FileExists(*BaseFilePath) || 
-			PlatformFile.FileExists(*TheirsFilePath) || 
+
+		if (PlatformFile.FileExists(*BaseFilePath) ||
+			PlatformFile.FileExists(*TheirsFilePath) ||
 			PlatformFile.FileExists(*OrigFilePath))
 		{
 			bHasConflictMarkers = true;
 		}
-		
+
 		// Log every 10th file for debugging (to avoid spam)
 		if (ManagedCount % 10 == 0)
 		{
-			UE_LOG(LogTemp, VeryVerbose, TEXT("PerforceAdapter: Checking file %d/%d: %s (Conflicted: %s, CheckedOut: %s, HasMarkers: %s)"), 
+			UE_LOG(LogTemp, VeryVerbose, TEXT("PerforceAdapter: Checking file %d/%d: %s (Conflicted: %s, CheckedOut: %s, HasMarkers: %s)"),
 				ManagedCount, UAssetFiles.Num(), *FPaths::GetCleanFilename(FilePath),
 				bIsConflicted ? TEXT("Yes") : TEXT("No"),
 				bIsCheckedOut ? TEXT("Yes") : TEXT("No"),
 				bHasConflictMarkers ? TEXT("Yes") : TEXT("No"));
 		}
-		
+
 		// If cached state shows conflict or we found markers, add to potential conflicts
 		if (bIsConflicted || bHasConflictMarkers)
 		{
 			PotentialConflicts.Add(FilePath);
-			UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Potential conflict found (cached): %s (IsConflicted: %s, HasMarkers: %s)"), 
+			UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Potential conflict found (cached): %s (IsConflicted: %s, HasMarkers: %s)"),
 				*FilePath, bIsConflicted ? TEXT("Yes") : TEXT("No"), bHasConflictMarkers ? TEXT("Yes") : TEXT("No"));
 		}
 	}
-	
+
 	UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Quick scan found %d potential conflicts, verifying with fresh state..."), PotentialConflicts.Num());
-	
+
 	// If no potential conflicts found in cached state, do a force update scan on all managed files
 	// This handles the case where cached state is stale
 	if (PotentialConflicts.Num() == 0 && ManagedCount > 0)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("PerforceAdapter: No conflicts found in cached state, doing full force update scan on %d managed files..."), ManagedCount);
-		
+
 		// Re-scan all managed files with force update
 		for (const FString& FilePath : UAssetFiles)
 		{
@@ -437,44 +441,44 @@ int32 FPerforceAdapter::DetectConflictedBlueprints(TArray<FString>& OutConflicte
 			{
 				continue;
 			}
-			
+
 			// Force update to get latest state
 			FileState = Provider->GetState(FilePath, EStateCacheUsage::ForceUpdate);
 			if (!FileState.IsValid())
 			{
 				continue;
 			}
-			
+
 			bool bIsConflicted = FileState->IsConflicted();
 			bool bHasConflictMarkers = false;
 			FString BaseFilePath = FilePath + TEXT(".BASE");
 			FString TheirsFilePath = FilePath + TEXT(".THEIRS");
 			FString OrigFilePath = FilePath + TEXT(".orig");
-			
-			if (PlatformFile.FileExists(*BaseFilePath) || 
-				PlatformFile.FileExists(*TheirsFilePath) || 
+
+			if (PlatformFile.FileExists(*BaseFilePath) ||
+				PlatformFile.FileExists(*TheirsFilePath) ||
 				PlatformFile.FileExists(*OrigFilePath))
 			{
 				bHasConflictMarkers = true;
 			}
-			
+
 			if (bIsConflicted || bHasConflictMarkers)
 			{
 				PotentialConflicts.Add(FilePath);
-				UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Found conflict on force update: %s (IsConflicted: %s, HasMarkers: %s)"), 
+				UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Found conflict on force update: %s (IsConflicted: %s, HasMarkers: %s)"),
 					*FilePath, bIsConflicted ? TEXT("Yes") : TEXT("No"), bHasConflictMarkers ? TEXT("Yes") : TEXT("No"));
 			}
 		}
-		
+
 		UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Force update scan found %d conflicts"), PotentialConflicts.Num());
 	}
-	
+
 	// Second pass: Force update only for potential conflicts to get accurate state
 	for (const FString& FilePath : PotentialConflicts)
 	{
 		// Now force update to get the latest accurate state
 		FSourceControlStatePtr FileState = Provider->GetState(FilePath, EStateCacheUsage::ForceUpdate);
-		
+
 		if (!FileState.IsValid())
 		{
 			UE_LOG(LogTemp, Warning, TEXT("PerforceAdapter: File state invalid after force update: %s"), *FilePath);
@@ -484,24 +488,24 @@ int32 FPerforceAdapter::DetectConflictedBlueprints(TArray<FString>& OutConflicte
 		// Check for conflicts with fresh state
 		bool bIsConflicted = FileState->IsConflicted();
 		bool bIsCheckedOut = FileState->IsCheckedOut();
-		
+
 		// Re-check conflict markers
 		bool bHasConflictMarkers = false;
 		FString BaseFilePath = FilePath + TEXT(".BASE");
 		FString TheirsFilePath = FilePath + TEXT(".THEIRS");
 		FString OrigFilePath = FilePath + TEXT(".orig");
-		
-		if (PlatformFile.FileExists(*BaseFilePath) || 
-			PlatformFile.FileExists(*TheirsFilePath) || 
+
+		if (PlatformFile.FileExists(*BaseFilePath) ||
+			PlatformFile.FileExists(*TheirsFilePath) ||
 			PlatformFile.FileExists(*OrigFilePath))
 		{
 			bHasConflictMarkers = true;
 		}
-		
+
 		if (bIsConflicted || bHasConflictMarkers)
 		{
 			ConflictedCount++;
-			
+
 			// Convert file path back to asset path for the output
 			FString AssetPath = FilePathToAssetPath(FilePath);
 			if (AssetPath.IsEmpty())
@@ -509,29 +513,29 @@ int32 FPerforceAdapter::DetectConflictedBlueprints(TArray<FString>& OutConflicte
 				// If conversion fails, use the file path as-is
 				AssetPath = FilePath;
 			}
-			
+
 			if (bHasConflictMarkers && !bIsConflicted)
 			{
 				UE_LOG(LogTemp, Warning, TEXT("PerforceAdapter: Found conflict marker files but IsConflicted() returned false for: %s"), *FilePath);
 			}
-			
+
 			if (!bIsCheckedOut)
 			{
 				UE_LOG(LogTemp, Warning, TEXT("PerforceAdapter: Found conflicted file that is NOT checked out: %s"), *FilePath);
 			}
-			
-			UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: ✓ Detected conflicted Blueprint: %s (Checked Out: %s, Has Markers: %s)"), 
-				*AssetPath, 
+
+			UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: ✓ Detected conflicted Blueprint: %s (Checked Out: %s, Has Markers: %s)"),
+				*AssetPath,
 				bIsCheckedOut ? TEXT("Yes") : TEXT("No"),
 				bHasConflictMarkers ? TEXT("Yes") : TEXT("No"));
-			
+
 			OutConflictedBlueprints.Add(AssetPath);
 		}
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Conflict detection complete - Scanned: %d files, Managed by Perforce: %d, Conflicted: %d"), 
+	UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Conflict detection complete - Scanned: %d files, Managed by Perforce: %d, Conflicted: %d"),
 		CheckedCount, ManagedCount, ConflictedCount);
-	
+
 	if (ConflictedCount == 0 && ManagedCount > 0)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("PerforceAdapter: No conflicts detected, but %d files are managed by Perforce."), ManagedCount);
@@ -589,7 +593,7 @@ FString FPerforceAdapter::AssetPathToFilePath(const FString& AssetPath)
 	// AssetPath should be a package name like "/Game/Path/BP_MyBlueprint"
 	// Package names in Unreal should start with "/" (long package name format)
 	FString PackageName = AssetPath;
-	
+
 	// Ensure it starts with "/" for long package name format
 	if (!PackageName.StartsWith(TEXT("/")))
 	{
@@ -679,29 +683,29 @@ bool FPerforceAdapter::RevertFile(const FString& FilePath, FString& OutError)
 	// Use provider's Execute method with Revert operation
 	TSharedRef<FRevert, ESPMode::ThreadSafe> RevertOp = ISourceControlOperation::Create<FRevert>();
 	ECommandResult::Type Result = Provider->Execute(RevertOp, TArray<FString>{FilePath}, EConcurrency::Synchronous);
-	
+
 	if (Result == ECommandResult::Succeeded)
 	{
 		return true;
 	}
-	
+
 	OutError = TEXT("Revert failed");
 	return false;
 }
 
 bool FPerforceAdapter::LoadBlueprintFromVersion(const FString& FilePath, const FString& Version, UBlueprint*& OutBlueprint, TSharedPtr<FJsonObject>& OutSnapshot, FString& OutError)
 {
-	// Get the version-specific file path
+	// Get the version-specific file path (BASE/REMOTE are always fetched from Perforce into temp)
 	FString VersionFilePath = GetVersionFilePath(FilePath, Version);
 	if (VersionFilePath.IsEmpty())
 	{
 		if (Version == TEXT("BASE"))
 		{
-			OutError = FString::Printf(TEXT("BASE version file not found. Perforce conflict files (.BASE or .orig) are missing.\n\nTo fix this:\n1. Run 'p4 resolve' on the conflicted file\n2. Or ensure the file is in a proper conflicted state in Perforce\n\nFile: %s"), *FilePath);
+			OutError = FString::Printf(TEXT("Could not fetch BASE version from Perforce.\n\nFile: %s"), *FilePath);
 		}
 		else if (Version == TEXT("HEAD") || Version == TEXT("THEIRS") || Version == TEXT("REMOTE"))
 		{
-			OutError = FString::Printf(TEXT("REMOTE version file not found. Perforce conflict file (.THEIRS) is missing.\n\nTo fix this:\n1. Run 'p4 resolve' on the conflicted file\n2. Or fetch the HEAD version from Perforce\n\nFile: %s"), *FilePath);
+			OutError = FString::Printf(TEXT("Could not fetch REMOTE version from Perforce.\n\nFile: %s"), *FilePath);
 		}
 		else
 		{
@@ -718,20 +722,86 @@ bool FPerforceAdapter::LoadBlueprintFromVersion(const FString& FilePath, const F
 		return false;
 	}
 
-	// Try to load the asset from the version file path
-	FString AssetPath = FilePathToAssetPath(VersionFilePath);
+	// If version file is in our temp folder (Saved/...), copy to a loadable path under Content so LoadObject can resolve it
+	FString PathToLoad = VersionFilePath;
+	FString TempDir = GetTempDirectory();
+	if (VersionFilePath.StartsWith(TempDir))
+	{
+		FString LoadablePath, CopyError;
+		if (!CopyTempVersionToLoadablePath(VersionFilePath, Version, LoadablePath, CopyError))
+		{
+			OutError = FString::Printf(TEXT("Could not prepare temp version for loading: %s"), *CopyError);
+			return false;
+		}
+		PathToLoad = LoadablePath;
+
+		// So Unreal recognizes the new file: scan using package path (ScanPathsSynchronous expects /Game/..., not file paths)
+		FString PackagePathForScan = FilePathToAssetPath(LoadablePath);
+		if (!PackagePathForScan.IsEmpty())
+		{
+			int32 LastSlash;
+			if (PackagePathForScan.FindLastChar(TEXT('/'), LastSlash))
+			{
+				FString PackageDir = PackagePathForScan.Left(LastSlash);
+				if (!PackageDir.IsEmpty())
+				{
+					FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+					IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+					TArray<FString> PathsToScan;
+					PathsToScan.Add(PackageDir);
+					AssetRegistry.ScanPathsSynchronous(PathsToScan, /* bForceRescan */ true);
+				}
+			}
+		}
+	}
+
+	// Convert file path to asset path and load (use standard path so TryConvertFilenameToLongPackageName can resolve it)
+	FString PathToLoadNormalized = FPaths::ConvertRelativePathToFull(PathToLoad);
+	FString AssetPath = FilePathToAssetPath(PathToLoadNormalized);
+	if (AssetPath.IsEmpty() && PathToLoadNormalized.Contains(TEXT("BlueprintMergeToolTemp")))
+	{
+		// Fallback: we copied to Content/BlueprintMergeToolTemp; build package path manually
+		FString BaseName = FPaths::GetBaseFilename(PathToLoadNormalized, false);
+		AssetPath = FString::Printf(TEXT("/Game/BlueprintMergeToolTemp/%s"), *BaseName);
+	}
 	if (AssetPath.IsEmpty())
 	{
-		OutError = FString::Printf(TEXT("Could not convert version file path to asset path: %s\n\nThis may happen if the version file is not in the Content directory."), *VersionFilePath);
+		OutError = FString::Printf(TEXT("Could not convert version file path to asset path: %s"), *PathToLoad);
 		return false;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Loading Blueprint from version %s: %s (file: %s)"), *Version, *AssetPath, *VersionFilePath);
+	UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Loading Blueprint from version %s: %s (file: %s)"), *Version, *AssetPath, *PathToLoad);
 
 	OutBlueprint = LoadObject<UBlueprint>(nullptr, *AssetPath, nullptr, LOAD_NoWarn);
 	if (!OutBlueprint || !IsValid(OutBlueprint))
 	{
-		OutError = FString::Printf(TEXT("Failed to load Blueprint from version %s.\n\nAsset Path: %s\nFile Path: %s\n\nThis may indicate the file is corrupted or not a valid Blueprint."), *Version, *AssetPath, *VersionFilePath);
+		// The .uasset from Perforce was saved with an internal package path (e.g. /Game/ThirdPerson/Blueprints/BP_ThirdPersonCharacter).
+		// When we place it at BlueprintMergeToolTemp and load by that path, the engine may register the package under the internal name,
+		// so LoadObject returns nullptr. Load the package and find the Blueprint inside the loaded package.
+		UPackage* Pkg = LoadPackage(nullptr, *AssetPath, LOAD_None);
+		if (!Pkg && PathToLoadNormalized.Contains(TEXT("BlueprintMergeToolTemp")))
+		{
+			// Asset registry may have registered the file under its internal name; try loading by file path so the engine finds our file
+			Pkg = LoadPackage(nullptr, *PathToLoadNormalized, LOAD_None);
+		}
+		if (Pkg)
+		{
+			TArray<UObject*> Objs;
+			GetObjectsWithOuter(Pkg, Objs, /* bIncludeNestedObjects */ false);
+			for (UObject* Obj : Objs)
+			{
+				UBlueprint* BP = Cast<UBlueprint>(Obj);
+				if (BP && IsValid(BP))
+				{
+					OutBlueprint = BP;
+					break;
+				}
+			}
+		}
+	}
+	if (!OutBlueprint || !IsValid(OutBlueprint))
+	{
+		OutError = FString::Printf(TEXT("Failed to load Blueprint from version %s.\n\nAsset Path: %s\nFile Path: %s\n\nThis may indicate the file is corrupted or not a valid Blueprint."), *Version, *AssetPath, *PathToLoad);
 		return false;
 	}
 
@@ -762,15 +832,32 @@ bool FPerforceAdapter::FetchVersionFromPerforce(const FString& FilePath, const F
 	}
 
 	// Get Perforce settings once and reuse for all commands
-	// Try multiple config locations as they may vary by Unreal version
+	// Prefer Perforce plugin section (has the actual workspace Unreal connected with, e.g. Blueprint_new)
 	FString P4Port, P4User, P4Client;
-	
-	// Try primary location
-	GConfig->GetString(TEXT("/Script/SourceControl.SourceControlSettings"), TEXT("P4Port"), P4Port, GEditorPerProjectIni);
-	GConfig->GetString(TEXT("/Script/SourceControl.SourceControlSettings"), TEXT("P4User"), P4User, GEditorPerProjectIni);
-	GConfig->GetString(TEXT("/Script/SourceControl.SourceControlSettings"), TEXT("P4Client"), P4Client, GEditorPerProjectIni);
-	
-	// If empty, try alternative locations
+
+	const TCHAR* PerforceSection = TEXT("PerforceSourceControl.PerforceSourceControlSettings");
+	// Same config dir as editor (e.g. Saved/Config/WindowsEditor/) so we find SourceControlSettings.ini
+	FString SourceControlIni = FPaths::GetPath(GEditorPerProjectIni) / TEXT("SourceControlSettings.ini");
+
+	GConfig->GetString(PerforceSection, TEXT("Port"), P4Port, *SourceControlIni);
+	GConfig->GetString(PerforceSection, TEXT("UserName"), P4User, *SourceControlIni);
+	GConfig->GetString(PerforceSection, TEXT("Workspace"), P4Client, *SourceControlIni);
+
+	// Port from Perforce section may be just the number (e.g. 1666); p4 accepts that for localhost
+
+	// Fallback: legacy /Script/SourceControl.SourceControlSettings (P4Port, P4User, P4Client)
+	if (P4Port.IsEmpty())
+	{
+		GConfig->GetString(TEXT("/Script/SourceControl.SourceControlSettings"), TEXT("P4Port"), P4Port, GEditorPerProjectIni);
+	}
+	if (P4User.IsEmpty())
+	{
+		GConfig->GetString(TEXT("/Script/SourceControl.SourceControlSettings"), TEXT("P4User"), P4User, GEditorPerProjectIni);
+	}
+	if (P4Client.IsEmpty())
+	{
+		GConfig->GetString(TEXT("/Script/SourceControl.SourceControlSettings"), TEXT("P4Client"), P4Client, GEditorPerProjectIni);
+	}
 	if (P4Port.IsEmpty())
 	{
 		GConfig->GetString(TEXT("SourceControl.SourceControlSettings"), TEXT("P4Port"), P4Port, GEditorPerProjectIni);
@@ -783,13 +870,19 @@ bool FPerforceAdapter::FetchVersionFromPerforce(const FString& FilePath, const F
 	{
 		GConfig->GetString(TEXT("SourceControl.SourceControlSettings"), TEXT("P4Client"), P4Client, GEditorPerProjectIni);
 	}
-	
-	// Save current environment variables
+
+	if (!P4Client.IsEmpty())
+	{
+		UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Using workspace from config (PerforceSourceControl/Workspace): '%s'"), *P4Client);
+	}
+
+	// Save current environment variables (we'll restore them before return)
 	FString OldP4Port = FPlatformMisc::GetEnvironmentVariable(TEXT("P4PORT"));
 	FString OldP4User = FPlatformMisc::GetEnvironmentVariable(TEXT("P4USER"));
 	FString OldP4Client = FPlatformMisc::GetEnvironmentVariable(TEXT("P4CLIENT"));
-	
-	// Temporarily set environment variables if we have them from config
+
+	// Set only P4PORT and P4USER from config before p4 info. Do NOT set P4CLIENT yet:
+	// p4 info will then use the process's current P4CLIENT (the one Unreal set when it connected, e.g. Blueprint_new).
 	if (!P4Port.IsEmpty())
 	{
 		FPlatformMisc::SetEnvironmentVar(TEXT("P4PORT"), *P4Port);
@@ -798,36 +891,32 @@ bool FPerforceAdapter::FetchVersionFromPerforce(const FString& FilePath, const F
 	{
 		FPlatformMisc::SetEnvironmentVar(TEXT("P4USER"), *P4User);
 	}
-	if (!P4Client.IsEmpty())
+
+	// Run p4 info to get the actual client Unreal is using (from process env P4CLIENT, not config).
+	// This avoids using a stale/wrong client from config (e.g. DESKTOP-5F7UU9L) when Unreal connected as Blueprint_new.
 	{
-		FPlatformMisc::SetEnvironmentVar(TEXT("P4CLIENT"), *P4Client);
-	}
-	
-	// Now try p4 info if we still need settings
-	if (P4Port.IsEmpty() || P4User.IsEmpty() || P4Client.IsEmpty())
-	{
+		FString InfoArgs;
+		if (!P4Port.IsEmpty() && !P4User.IsEmpty())
+		{
+			InfoArgs = FString::Printf(TEXT("-p %s -u %s info"), *P4Port, *P4User);
+		}
+		else
+		{
+			InfoArgs = TEXT("info");
+		}
 		FString InfoOutput, InfoError;
 		int32 InfoReturnCode = 0;
-		bool bInfoSuccess = FPlatformProcess::ExecProcess(
-			TEXT("p4"),
-			TEXT("info"),
-			&InfoReturnCode,
-			&InfoOutput,
-			&InfoError
-		);
-		
+		bool bInfoSuccess = FPlatformProcess::ExecProcess(TEXT("p4"), *InfoArgs, &InfoReturnCode, &InfoOutput, &InfoError);
+
 		if (bInfoSuccess && InfoReturnCode == 0 && !InfoOutput.IsEmpty())
 		{
-			// Parse p4 info output
 			TArray<FString> InfoLines;
 			InfoOutput.ParseIntoArrayLines(InfoLines);
-			
 			for (const FString& Line : InfoLines)
 			{
 				if (P4Port.IsEmpty() && Line.StartsWith(TEXT("Server address:")))
 				{
-					FString Address = Line.Mid(15).TrimStartAndEnd();
-					P4Port = Address;
+					P4Port = Line.Mid(15).TrimStartAndEnd();
 				}
 				else if (P4User.IsEmpty() && Line.StartsWith(TEXT("User name:")))
 				{
@@ -835,15 +924,19 @@ bool FPerforceAdapter::FetchVersionFromPerforce(const FString& FilePath, const F
 				}
 				else if (P4Client.IsEmpty() && Line.StartsWith(TEXT("Client name:")))
 				{
-					P4Client = Line.Mid(12).TrimStartAndEnd();
+					FString InfoClient = Line.Mid(12).TrimStartAndEnd();
+					if (!InfoClient.IsEmpty())
+					{
+						P4Client = InfoClient;
+						UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Using client from p4 info: '%s'"), *P4Client);
+					}
 				}
 			}
-			
-			UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Got settings from p4 info - P4Port: '%s', P4User: '%s', P4Client: '%s'"), 
+			UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: p4 info - P4Port: '%s', P4User: '%s', P4Client: '%s'"),
 				*P4Port, *P4User, *P4Client);
 		}
 	}
-	
+
 	// Ensure environment variables are set for all subsequent p4 commands
 	if (!P4Port.IsEmpty())
 	{
@@ -857,10 +950,10 @@ bool FPerforceAdapter::FetchVersionFromPerforce(const FString& FilePath, const F
 	{
 		FPlatformMisc::SetEnvironmentVar(TEXT("P4CLIENT"), *P4Client);
 	}
-	
-	UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Final settings - P4Port: '%s', P4User: '%s', P4Client: '%s'"), 
+
+	UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Final settings - P4Port: '%s', P4User: '%s', P4Client: '%s'"),
 		*P4Port, *P4User, *P4Client);
-	
+
 	// Create temp directory if it doesn't exist
 	FString TempDir = GetTempDirectory();
 	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
@@ -872,196 +965,318 @@ bool FPerforceAdapter::FetchVersionFromPerforce(const FString& FilePath, const F
 	// Generate temp file path
 	FString FileName = FPaths::GetCleanFilename(FilePath);
 	FString TempFilePath = TempDir / FString::Printf(TEXT("%s_%s"), *FileName, *Version);
-	
-	// For BASE version, we need to get the actual revision number we have locally
-	// For REMOTE/HEAD, we need the head revision
-	FString FileSpec;
-	
-	if (Version == TEXT("BASE"))
+
+	// Get depot path and revisions via p4 fstat -Ot (tagged output; -Ot = tagged, file path must follow)
+	FString FstatDepotFile, FstatHaveRev, FstatHeadRev;
+	FString LastP4Error;  // used to detect "client unknown" / "must create client" for a clear message
 	{
-		// Instead of using p4 have (which requires a valid client), use p4 where to get depot path,
-		// then use p4 files to get file info, or use p4 print directly with depot path
-		// First, get the depot path using p4 where
-		FString WhereCommand;
-		if (!P4Port.IsEmpty() && !P4User.IsEmpty())
+		FString FstatCommand;
+		if (!P4Port.IsEmpty() && !P4User.IsEmpty() && !P4Client.IsEmpty())
 		{
-			// Use p4 -p -u flags (no client needed for where)
-			WhereCommand = FString::Printf(TEXT("-p %s -u %s where \"%s\""), 
+			FstatCommand = FString::Printf(TEXT("-p %s -u %s -c %s fstat -Ot \"%s\""),
+				*P4Port, *P4User, *P4Client, *FilePath);
+		}
+		else if (!P4Port.IsEmpty() && !P4User.IsEmpty())
+		{
+			FstatCommand = FString::Printf(TEXT("-p %s -u %s fstat -Ot \"%s\""),
 				*P4Port, *P4User, *FilePath);
 		}
 		else
 		{
-			WhereCommand = FString::Printf(TEXT("where \"%s\""), *FilePath);
+			FstatCommand = FString::Printf(TEXT("fstat -Ot \"%s\""), *FilePath);
 		}
-		
-		FString WhereOutput, WhereError;
-		int32 WhereReturnCode = 0;
-		UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Getting depot path with: p4 %s"), *WhereCommand);
-		
-		bool bWhereSuccess = FPlatformProcess::ExecProcess(
-			TEXT("p4"),
-			*WhereCommand,
-			&WhereReturnCode,
-			&WhereOutput,
-			&WhereError
-		);
-		
-		FString DepotPath;
-		if (bWhereSuccess && WhereReturnCode == 0 && !WhereOutput.IsEmpty())
+		FString FstatOutput, FstatError;
+		int32 FstatReturnCode = 0;
+		UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Getting file status with: p4 %s"), *FstatCommand);
+		bool bFstatSuccess = FPlatformProcess::ExecProcess(TEXT("p4"), *FstatCommand, &FstatReturnCode, &FstatOutput, &FstatError);
+		if (bFstatSuccess && FstatReturnCode == 0 && !FstatOutput.IsEmpty())
 		{
-			// p4 where returns: "//depot/path/file - /local/path/file - /local/path/file"
-			// We want the first part (depot path)
-			TArray<FString> WhereParts;
-			WhereOutput.ParseIntoArray(WhereParts, TEXT(" "), true);
-			if (WhereParts.Num() > 0 && WhereParts[0].StartsWith(TEXT("//")))
+			TArray<FString> FstatLines;
+			FstatOutput.ParseIntoArrayLines(FstatLines);
+			for (const FString& Line : FstatLines)
 			{
-				DepotPath = WhereParts[0];
-				UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Got depot path: %s"), *DepotPath);
-			}
-		}
-		
-		// If we couldn't get depot path, try using p4 files with local path
-		if (DepotPath.IsEmpty())
-		{
-			// Try p4 files to get file info (includes depot path and revision)
-			FString FilesCommand;
-			if (!P4Port.IsEmpty() && !P4User.IsEmpty())
-			{
-				FilesCommand = FString::Printf(TEXT("-p %s -u %s files \"%s\""), 
-					*P4Port, *P4User, *FilePath);
-			}
-			else
-			{
-				FilesCommand = FString::Printf(TEXT("files \"%s\""), *FilePath);
-			}
-			
-			FString FilesOutput, FilesError;
-			int32 FilesReturnCode = 0;
-			UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Getting file info with: p4 %s"), *FilesCommand);
-			
-			bool bFilesSuccess = FPlatformProcess::ExecProcess(
-				TEXT("p4"),
-				*FilesCommand,
-				&FilesReturnCode,
-				&FilesOutput,
-				&FilesError
-			);
-			
-			if (bFilesSuccess && FilesReturnCode == 0 && !FilesOutput.IsEmpty())
-			{
-				// p4 files returns: "//depot/path/file#revision - action"
-				// Extract depot path and revision
-				int32 HashIndex = FilesOutput.Find(TEXT("#"));
-				if (HashIndex != INDEX_NONE)
+				FString Trimmed = Line.TrimStartAndEnd();
+				// Tagged format uses "fieldName\tvalue" or "fieldName value"
+				auto ParseTaggedValue = [&Trimmed](const TCHAR* Prefix, int32 PrefixLen) -> FString
 				{
-					DepotPath = FilesOutput.Left(HashIndex);
-					UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Got depot path from files: %s"), *DepotPath);
-				}
-			}
-		}
-		
-		// Don't restore environment variables yet - we still need them for p4 print
-		// They will be restored at the end of the function after p4 print completes
-		
-		// For BASE version, we need the revision that was synced before the conflict
-		// Since we can't use p4 have without a valid client, we'll use the depot path
-		// and try to get the revision from p4 files
-		FString RevisionNumber;
-		
-		if (DepotPath.IsEmpty())
-		{
-			OutError = FString::Printf(TEXT("Could not determine depot path for: %s\n\nThis may mean the file is not in Perforce or the connection settings are incorrect."), *FilePath);
-			UE_LOG(LogTemp, Error, TEXT("PerforceAdapter: %s"), *OutError);
-			return false;
-		}
-		
-		// Try to get revision from p4 files with depot path
-		if (RevisionNumber.IsEmpty())
-		{
-			// Try to get revision from p4 files with depot path
-			FString FilesCommand;
-			if (!P4Port.IsEmpty() && !P4User.IsEmpty())
-			{
-				FilesCommand = FString::Printf(TEXT("-p %s -u %s files \"%s\""), 
-					*P4Port, *P4User, *DepotPath);
-			}
-			else
-			{
-				FilesCommand = FString::Printf(TEXT("files \"%s\""), *DepotPath);
-			}
-			
-			FString FilesOutput, FilesError;
-			int32 FilesReturnCode = 0;
-			bool bFilesSuccess = FPlatformProcess::ExecProcess(
-				TEXT("p4"),
-				*FilesCommand,
-				&FilesReturnCode,
-				&FilesOutput,
-				&FilesError
-			);
-			
-			if (bFilesSuccess && FilesReturnCode == 0 && !FilesOutput.IsEmpty())
-			{
-				// p4 files returns: "//depot/path/file#revision - action"
-				int32 HashIndex = FilesOutput.Find(TEXT("#"));
-				if (HashIndex != INDEX_NONE)
-				{
-					int32 SpaceIndex = FilesOutput.Find(TEXT(" "), ESearchCase::CaseSensitive, ESearchDir::FromStart, HashIndex);
-					if (SpaceIndex != INDEX_NONE)
+					if (!Trimmed.StartsWith(Prefix)) return FString();
+					int32 ValueStart = PrefixLen;
+					while (ValueStart < Trimmed.Len() && (Trimmed[ValueStart] == ' ' || Trimmed[ValueStart] == '\t'))
 					{
-						RevisionNumber = FilesOutput.Mid(HashIndex + 1, SpaceIndex - HashIndex - 1);
+						ValueStart++;
 					}
+					return Trimmed.Mid(ValueStart).TrimStartAndEnd();
+				};
+				if (Trimmed.StartsWith(TEXT("depotFile")))
+				{
+					FstatDepotFile = ParseTaggedValue(TEXT("depotFile"), 9);
+				}
+				else if (Trimmed.StartsWith(TEXT("haveRev")))
+				{
+					FstatHaveRev = ParseTaggedValue(TEXT("haveRev"), 7);
+				}
+				else if (Trimmed.StartsWith(TEXT("headRev")))
+				{
+					FstatHeadRev = ParseTaggedValue(TEXT("headRev"), 7);
 				}
 			}
-		}
-		
-		// Use depot path for file spec (p4 print can work with depot path directly)
-		if (!DepotPath.IsEmpty())
-		{
-			if (!RevisionNumber.IsEmpty())
+			if (!FstatDepotFile.IsEmpty())
 			{
-				FileSpec = FString::Printf(TEXT("%s#%s"), *DepotPath, *RevisionNumber);
-				UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: BASE version - using depot path %s with revision %s"), *DepotPath, *RevisionNumber);
-			}
-			else
-			{
-				// Use depot path without revision - p4 print will use the current head
-				// This is not ideal for BASE, but it's a fallback
-				FileSpec = DepotPath;
-				UE_LOG(LogTemp, Warning, TEXT("PerforceAdapter: Could not determine BASE revision, using depot path %s (may not be correct BASE version)"), *DepotPath);
+				UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: fstat depotFile=%s haveRev=%s headRev=%s"), *FstatDepotFile, *FstatHaveRev, *FstatHeadRev);
 			}
 		}
 		else
 		{
-			OutError = FString::Printf(TEXT("Could not determine depot path for: %s\n\nThis may mean the file is not in Perforce or the connection settings are incorrect."), *FilePath);
+			LastP4Error = FstatError;
+			UE_LOG(LogTemp, Warning, TEXT("PerforceAdapter: p4 fstat failed (code=%d). StdErr: %s"), FstatReturnCode, *FstatError);
+		}
+	}
+
+	FString FileSpec;
+
+	if (Version == TEXT("BASE"))
+	{
+		FString DepotPath = FstatDepotFile;
+		FString RevisionNumber = FstatHaveRev;
+
+		if (DepotPath.IsEmpty() || RevisionNumber.IsEmpty())
+		{
+			FString WhereCommand;
+			if (!P4Port.IsEmpty() && !P4User.IsEmpty() && !P4Client.IsEmpty())
+			{
+				WhereCommand = FString::Printf(TEXT("-p %s -u %s -c %s where \"%s\""),
+					*P4Port, *P4User, *P4Client, *FilePath);
+			}
+			else if (!P4Port.IsEmpty() && !P4User.IsEmpty())
+			{
+				WhereCommand = FString::Printf(TEXT("-p %s -u %s where \"%s\""),
+					*P4Port, *P4User, *FilePath);
+			}
+			else
+			{
+				WhereCommand = FString::Printf(TEXT("where \"%s\""), *FilePath);
+			}
+			FString WhereOutput, WhereError;
+			int32 WhereReturnCode = 0;
+			bool bWhereSuccess = FPlatformProcess::ExecProcess(TEXT("p4"), *WhereCommand, &WhereReturnCode, &WhereOutput, &WhereError);
+			if (bWhereSuccess && WhereReturnCode == 0 && !WhereOutput.IsEmpty())
+			{
+				// p4 where returns: depotPath clientPath localPath (separator can be " - ", tab, or space)
+				FString FirstPath;
+				int32 Sep = WhereOutput.Find(TEXT(" - "));
+				if (Sep == INDEX_NONE)
+				{
+					Sep = WhereOutput.Find(TEXT("\t"));
+				}
+				if (Sep == INDEX_NONE)
+				{
+					Sep = WhereOutput.Find(TEXT(" "));
+				}
+				FirstPath = (Sep != INDEX_NONE) ? WhereOutput.Left(Sep).TrimStartAndEnd() : WhereOutput.TrimStartAndEnd();
+				if (FirstPath.StartsWith(TEXT("//")))
+				{
+					DepotPath = FirstPath;
+					UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Got depot path from where: %s"), *DepotPath);
+				}
+			}
+			else
+			{
+				LastP4Error = WhereError;
+				UE_LOG(LogTemp, Warning, TEXT("PerforceAdapter: p4 where failed (code=%d). StdErr: %s"), WhereReturnCode, *WhereError);
+			}
+
+			if (DepotPath.IsEmpty())
+			{
+				FString FilesCommand;
+				if (!P4Port.IsEmpty() && !P4User.IsEmpty() && !P4Client.IsEmpty())
+				{
+					FilesCommand = FString::Printf(TEXT("-p %s -u %s -c %s files \"%s\""),
+						*P4Port, *P4User, *P4Client, *FilePath);
+				}
+				else if (!P4Port.IsEmpty() && !P4User.IsEmpty())
+				{
+					FilesCommand = FString::Printf(TEXT("-p %s -u %s files \"%s\""),
+						*P4Port, *P4User, *FilePath);
+				}
+				else
+				{
+					FilesCommand = FString::Printf(TEXT("files \"%s\""), *FilePath);
+				}
+				FString FilesOutput, FilesError;
+				int32 FilesReturnCode = 0;
+				bool bFilesSuccess = FPlatformProcess::ExecProcess(TEXT("p4"), *FilesCommand, &FilesReturnCode, &FilesOutput, &FilesError);
+				if (bFilesSuccess && FilesReturnCode == 0 && !FilesOutput.IsEmpty())
+				{
+					int32 HashIndex = FilesOutput.Find(TEXT("#"));
+					if (HashIndex != INDEX_NONE)
+					{
+						DepotPath = FilesOutput.Left(HashIndex).TrimStartAndEnd();
+						int32 SpaceIndex = FilesOutput.Find(TEXT(" "), ESearchCase::CaseSensitive, ESearchDir::FromStart, HashIndex);
+						if (SpaceIndex != INDEX_NONE)
+						{
+							RevisionNumber = FilesOutput.Mid(HashIndex + 1, SpaceIndex - HashIndex - 1).TrimStartAndEnd();
+						}
+					}
+					if (!DepotPath.IsEmpty())
+					{
+						UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Got depot path from files: %s"), *DepotPath);
+					}
+				}
+			}
+
+			if (RevisionNumber.IsEmpty() && !DepotPath.IsEmpty())
+			{
+				FString FilesCommand;
+				if (!P4Port.IsEmpty() && !P4User.IsEmpty() && !P4Client.IsEmpty())
+				{
+					FilesCommand = FString::Printf(TEXT("-p %s -u %s -c %s files \"%s\""),
+						*P4Port, *P4User, *P4Client, *DepotPath);
+				}
+				else if (!P4Port.IsEmpty() && !P4User.IsEmpty())
+				{
+					FilesCommand = FString::Printf(TEXT("-p %s -u %s files \"%s\""),
+						*P4Port, *P4User, *DepotPath);
+				}
+				else
+				{
+					FilesCommand = FString::Printf(TEXT("files \"%s\""), *DepotPath);
+				}
+				FString FilesOutput, FilesError;
+				int32 FilesReturnCode = 0;
+				FPlatformProcess::ExecProcess(TEXT("p4"), *FilesCommand, &FilesReturnCode, &FilesOutput, &FilesError);
+				if (FilesReturnCode == 0 && !FilesOutput.IsEmpty())
+				{
+					int32 HashIndex = FilesOutput.Find(TEXT("#"));
+					if (HashIndex != INDEX_NONE)
+					{
+						int32 SpaceIndex = FilesOutput.Find(TEXT(" "), ESearchCase::CaseSensitive, ESearchDir::FromStart, HashIndex);
+						if (SpaceIndex != INDEX_NONE)
+						{
+							RevisionNumber = FilesOutput.Mid(HashIndex + 1, SpaceIndex - HashIndex - 1).TrimStartAndEnd();
+						}
+					}
+				}
+			}
+		}
+
+		if (DepotPath.IsEmpty())
+		{
+			if ((LastP4Error.Contains(TEXT("unknown")) && LastP4Error.Contains(TEXT("client"))) ||
+				LastP4Error.Contains(TEXT("must create client")))
+			{
+				OutError = FString::Printf(TEXT(
+					"The Perforce client workspace '%s' does not exist on the server.\n\n"
+					"Create it first:\n"
+					"  1. Open a terminal and run:  p4 client %s\n"
+					"  2. Edit the client spec (Root, View) and save.\n"
+					"Or in P4V: Connection → Edit Current Workspace → create/set workspace '%s'.\n\n"
+					"Then retry loading from Perforce."),
+					*P4Client, *P4Client, *P4Client);
+			}
+			else
+			{
+				OutError = FString::Printf(TEXT("Could not determine depot path for: %s\n\np4 fstat/where/files failed. Check Perforce connection and that the file is in the client view."), *FilePath);
+			}
 			UE_LOG(LogTemp, Error, TEXT("PerforceAdapter: %s"), *OutError);
 			return false;
+		}
+
+		if (!RevisionNumber.IsEmpty())
+		{
+			FileSpec = FString::Printf(TEXT("%s#%s"), *DepotPath, *RevisionNumber);
+			UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: BASE - using %s"), *FileSpec);
+		}
+		else
+		{
+			FileSpec = DepotPath;
+			UE_LOG(LogTemp, Warning, TEXT("PerforceAdapter: BASE revision unknown, using depot path: %s"), *DepotPath);
 		}
 	}
 	else if (Version == TEXT("HEAD") || Version == TEXT("THEIRS") || Version == TEXT("REMOTE"))
 	{
-		// Get the head revision from depot
-		FileSpec = FilePath + TEXT("#head");
-		UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: REMOTE version - using #head"));
+		// REMOTE = head revision in depot. Must use depot path, not local path.
+		FString DepotPath = FstatDepotFile;
+		if (DepotPath.IsEmpty())
+		{
+			FString WhereCommand;
+			if (!P4Port.IsEmpty() && !P4User.IsEmpty() && !P4Client.IsEmpty())
+			{
+				WhereCommand = FString::Printf(TEXT("-p %s -u %s -c %s where \"%s\""),
+					*P4Port, *P4User, *P4Client, *FilePath);
+			}
+			else if (!P4Port.IsEmpty() && !P4User.IsEmpty())
+			{
+				WhereCommand = FString::Printf(TEXT("-p %s -u %s where \"%s\""),
+					*P4Port, *P4User, *FilePath);
+			}
+			else
+			{
+				WhereCommand = FString::Printf(TEXT("where \"%s\""), *FilePath);
+			}
+			FString WhereOutput, WhereError;
+			int32 WhereReturnCode = 0;
+			FPlatformProcess::ExecProcess(TEXT("p4"), *WhereCommand, &WhereReturnCode, &WhereOutput, &WhereError);
+			if (WhereReturnCode == 0 && !WhereOutput.IsEmpty())
+			{
+				int32 Sep = WhereOutput.Find(TEXT(" - "));
+				if (Sep == INDEX_NONE)
+				{
+					Sep = WhereOutput.Find(TEXT("\t"));
+				}
+				if (Sep == INDEX_NONE)
+				{
+					Sep = WhereOutput.Find(TEXT(" "));
+				}
+				FString FirstPath = (Sep != INDEX_NONE) ? WhereOutput.Left(Sep).TrimStartAndEnd() : WhereOutput.TrimStartAndEnd();
+				if (FirstPath.StartsWith(TEXT("//")))
+				{
+					DepotPath = FirstPath;
+				}
+			}
+			else
+			{
+				LastP4Error = WhereError;
+			}
+		}
+		if (DepotPath.IsEmpty())
+		{
+			if ((LastP4Error.Contains(TEXT("unknown")) && LastP4Error.Contains(TEXT("client"))) ||
+				LastP4Error.Contains(TEXT("must create client")))
+			{
+				OutError = FString::Printf(TEXT(
+					"The Perforce client workspace '%s' does not exist on the server.\n\n"
+					"Create it: run  p4 client %s  then edit Root/View and save.\n"
+					"Or in P4V: Connection → Edit Current Workspace → create workspace '%s'."),
+					*P4Client, *P4Client, *P4Client);
+			}
+			else
+			{
+				OutError = FString::Printf(TEXT("Could not determine depot path for REMOTE: %s"), *FilePath);
+			}
+			UE_LOG(LogTemp, Error, TEXT("PerforceAdapter: %s"), *OutError);
+			return false;
+		}
+		FileSpec = DepotPath + TEXT("#head");
+		UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: REMOTE - using %s"), *FileSpec);
 	}
 	else
 	{
 		OutError = FString::Printf(TEXT("Unknown version type: %s"), *Version);
 		return false;
 	}
-	
+
 	UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Attempting to fetch %s version from Perforce for: %s"), *Version, *FilePath);
 	UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Using file spec: %s"), *FileSpec);
-	
+
 	// Settings are already retrieved above, reuse them for p4 print
-	
+
 	// Execute p4 print command with connection flags if available
 	// p4 print -o <output_file> <file_spec>
 	FString P4CommandArgs;
 	if (!P4Port.IsEmpty() && !P4User.IsEmpty() && !P4Client.IsEmpty())
 	{
 		// Use p4 -p -u -c flags to specify connection info directly
-		P4CommandArgs = FString::Printf(TEXT("-p %s -u %s -c %s print -o \"%s\" \"%s\""), 
+		P4CommandArgs = FString::Printf(TEXT("-p %s -u %s -c %s print -o \"%s\" \"%s\""),
 			*P4Port, *P4User, *P4Client, *TempFilePath, *FileSpec);
 		UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Using p4 print with explicit connection flags"));
 	}
@@ -1071,9 +1286,9 @@ bool FPerforceAdapter::FetchVersionFromPerforce(const FString& FilePath, const F
 		P4CommandArgs = FString::Printf(TEXT("print -o \"%s\" \"%s\""), *TempFilePath, *FileSpec);
 		UE_LOG(LogTemp, Warning, TEXT("PerforceAdapter: Perforce config incomplete for print, using environment variables"));
 	}
-	
+
 	UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Executing: p4 %s"), *P4CommandArgs);
-	
+
 	// Execute the command
 	int32 ReturnCode = 0;
 	FString StdOut, StdErr;
@@ -1084,7 +1299,7 @@ bool FPerforceAdapter::FetchVersionFromPerforce(const FString& FilePath, const F
 		&StdOut,
 		&StdErr
 	);
-	
+
 	// Restore environment variables before returning (whether success or failure)
 	if (!OldP4Port.IsEmpty())
 	{
@@ -1110,24 +1325,24 @@ bool FPerforceAdapter::FetchVersionFromPerforce(const FString& FilePath, const F
 	{
 		FPlatformMisc::SetEnvironmentVar(TEXT("P4CLIENT"), TEXT(""));
 	}
-	
+
 	if (!bSuccess || ReturnCode != 0)
 	{
-		OutError = FString::Printf(TEXT("Failed to execute p4 print command.\nReturn code: %d\nError: %s\n\nCommand: p4 %s"), 
+		OutError = FString::Printf(TEXT("Failed to execute p4 print command.\nReturn code: %d\nError: %s\n\nCommand: p4 %s"),
 			ReturnCode, *StdErr, *P4CommandArgs);
 		UE_LOG(LogTemp, Error, TEXT("PerforceAdapter: %s"), *OutError);
 		return false;
 	}
-	
+
 	// Check if the file was created
 	if (!PlatformFile.FileExists(*TempFilePath))
 	{
-		OutError = FString::Printf(TEXT("p4 print command succeeded but output file was not created: %s\n\nStdOut: %s\nStdErr: %s"), 
+		OutError = FString::Printf(TEXT("p4 print command succeeded but output file was not created: %s\n\nStdOut: %s\nStdErr: %s"),
 			*TempFilePath, *StdOut, *StdErr);
 		UE_LOG(LogTemp, Error, TEXT("PerforceAdapter: %s"), *OutError);
 		return false;
 	}
-	
+
 	UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Successfully fetched %s version to: %s"), *Version, *TempFilePath);
 	OutVersionFilePath = TempFilePath;
 	return true;
@@ -1135,66 +1350,32 @@ bool FPerforceAdapter::FetchVersionFromPerforce(const FString& FilePath, const F
 
 FString FPerforceAdapter::GetVersionFilePath(const FString& FilePath, const FString& Version)
 {
-	// For BASE version in Perforce conflicts, the file is typically named with .BASE extension
-	// For HEAD/REMOTE version, we'd need to fetch it from Perforce
-	
-	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
-	
+	// Always fetch BASE and REMOTE from Perforce and store in temp folder, then run merge locally.
+	// We no longer use .BASE/.THEIRS next to the file — we get base and remote from the server into temp.
+
 	if (Version == TEXT("BASE"))
 	{
-		// Perforce creates a .BASE file in the same directory when there's a conflict
-		// This is the common ancestor version (what both LOCAL and REMOTE were based on)
-		FString BaseFilePath = FilePath + TEXT(".BASE");
-		
-		if (PlatformFile.FileExists(*BaseFilePath))
-		{
-			UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Found BASE version at: %s"), *BaseFilePath);
-			return BaseFilePath;
-		}
-		
-		// If .BASE doesn't exist, try .orig or other common suffixes
-		BaseFilePath = FilePath + TEXT(".orig");
-		if (PlatformFile.FileExists(*BaseFilePath))
-		{
-			UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Found BASE version (as .orig) at: %s"), *BaseFilePath);
-			return BaseFilePath;
-		}
-		
-		// If BASE file doesn't exist, try to fetch it from Perforce
-		UE_LOG(LogTemp, Warning, TEXT("PerforceAdapter: BASE version file not found, attempting to fetch from Perforce..."));
 		FString FetchedPath, Error;
 		if (FetchVersionFromPerforce(FilePath, Version, FetchedPath, Error))
 		{
+			UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Fetched BASE version from Perforce to temp: %s"), *FetchedPath);
 			return FetchedPath;
 		}
-		
 		UE_LOG(LogTemp, Error, TEXT("PerforceAdapter: Could not fetch BASE version: %s"), *Error);
 		return FString();
 	}
 	else if (Version == TEXT("HEAD") || Version == TEXT("THEIRS") || Version == TEXT("REMOTE"))
 	{
-		// Perforce creates a .THEIRS file during conflict resolution
-		// This is the remote version (what's in the depot)
-		FString TheirsFilePath = FilePath + TEXT(".THEIRS");
-		
-		if (PlatformFile.FileExists(*TheirsFilePath))
-		{
-			UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Found REMOTE/THEIRS version at: %s"), *TheirsFilePath);
-			return TheirsFilePath;
-		}
-		
-		// If .THEIRS doesn't exist, try to fetch it from Perforce
-		UE_LOG(LogTemp, Warning, TEXT("PerforceAdapter: REMOTE/THEIRS version file not found, attempting to fetch from Perforce..."));
 		FString FetchedPath, Error;
 		if (FetchVersionFromPerforce(FilePath, Version, FetchedPath, Error))
 		{
+			UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Fetched REMOTE version from Perforce to temp: %s"), *FetchedPath);
 			return FetchedPath;
 		}
-		
 		UE_LOG(LogTemp, Error, TEXT("PerforceAdapter: Could not fetch REMOTE version: %s"), *Error);
 		return FString();
 	}
-	
+
 	// For LOCAL version, return the original file path
 	// This is your working copy (with your local changes)
 	if (Version == TEXT("LOCAL") || Version.IsEmpty())
@@ -1202,7 +1383,7 @@ FString FPerforceAdapter::GetVersionFilePath(const FString& FilePath, const FStr
 		UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Using LOCAL version from: %s"), *FilePath);
 		return FilePath;
 	}
-	
+
 	// Fallback: return empty string if version file not found
 	UE_LOG(LogTemp, Error, TEXT("PerforceAdapter: Could not find version file for version '%s' of: %s"), *Version, *FilePath);
 	return FString();
@@ -1216,5 +1397,47 @@ bool FPerforceAdapter::IsBlueprintFile(const FString& FilePath)
 FString FPerforceAdapter::GetTempDirectory()
 {
 	return FPaths::ProjectSavedDir() / TEXT("BlueprintMergeTool") / TEXT("TempVersions");
+}
+
+bool FPerforceAdapter::CopyTempVersionToLoadablePath(const FString& TempVersionFilePath, const FString& Version, FString& OutLoadableFilePath, FString& OutError)
+{
+	// Copy temp file to a path under Content. Use original Blueprint name + unique suffix so we never
+	// overwrite a file that may be loaded (and locked) by the engine.
+	FString LoadableDir = FPaths::ProjectContentDir() / TEXT("BlueprintMergeToolTemp");
+	FString TempFileName = FPaths::GetCleanFilename(TempVersionFilePath);
+	FString BaseName = TempFileName;
+	if (BaseName.RemoveFromEnd(TEXT("_BASE")) || BaseName.RemoveFromEnd(TEXT("_REMOTE")))
+	{
+		// BaseName is now "BP_ThirdPersonCharacter.uasset"
+	}
+	FString AssetBaseName = FPaths::GetBaseFilename(BaseName, false);
+	if (AssetBaseName.IsEmpty())
+	{
+		AssetBaseName = TEXT("MergeBlueprint");
+	}
+	// Unique suffix so we don't overwrite a locked file from a previous load
+	FString UniqueSuffix = FGuid::NewGuid().ToString().Left(8);
+	FString LoadableFileName = AssetBaseName + (Version == TEXT("BASE") ? TEXT("_Base_") : TEXT("_Remote_")) + UniqueSuffix + TEXT(".uasset");
+	OutLoadableFilePath = LoadableDir / LoadableFileName;
+
+	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+	if (!PlatformFile.DirectoryExists(*LoadableDir))
+	{
+		if (!PlatformFile.CreateDirectoryTree(*LoadableDir))
+		{
+			OutError = FString::Printf(TEXT("Could not create loadable directory: %s"), *LoadableDir);
+			return false;
+		}
+	}
+
+	// No need to delete first - we use a unique filename each time
+	if (!PlatformFile.CopyFile(*OutLoadableFilePath, *TempVersionFilePath, EPlatformFileRead::None, EPlatformFileWrite::None))
+	{
+		OutError = FString::Printf(TEXT("Could not copy temp version to loadable path. From: %s To: %s"), *TempVersionFilePath, *OutLoadableFilePath);
+		return false;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("PerforceAdapter: Copied %s version from temp to loadable path: %s"), *Version, *OutLoadableFilePath);
+	return true;
 }
 

@@ -1,5 +1,6 @@
 #include "../Public/MergeUI.h"
 #include "../Public/PerforceAdapter.h"
+#include "Widgets/SWidget.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
@@ -349,7 +350,7 @@ TSharedRef<SWidget> SMergeUI::CreatePerforceSection()
 				}
 				else
 				{
-					return FText::FromString(TEXT("⚠ Perforce is not configured.\nTo enable: 1) Edit → Plugins → Enable 'Perforce Source Control', 2) Toolbar → Source Control → Connect to Source Control → Select Perforce\nManual Blueprint selection is still available below."));
+					return FText::FromString(TEXT("⚠ Perforce is not configured. Manual Blueprint selection is still available below."));
 				}
 			})
 			.Font(FCoreStyle::GetDefaultFontStyle("Normal", 10))
@@ -689,10 +690,7 @@ TSharedRef<SWidget> SMergeUI::CreateActionButtonsSection()
 					return FText::FromString(TEXT("✅ Apply Merge"));
 				})
 				.OnClicked(this, &SMergeUI::OnApplyMerge)
-				.IsEnabled_Lambda([this]() -> bool
-				{
-					return bMergePlanCreated; // Allow applying even with conflicts (user will be warned)
-				})
+				.IsEnabled(true)
 				.ToolTipText_Lambda([this]() -> FText
 				{
 					if (bHasUnresolvedConflicts)
@@ -944,6 +942,8 @@ FReply SMergeUI::OnCreateMergePlan()
 			CurrentMergePlan.AutoResolvedOperations.Num(), CurrentMergePlan.ManualReviewRequired.Num());
 
 		UpdatePreview();
+		// Force Slate to re-evaluate button enabled state so Apply Merge is not greyed out
+		Invalidate(EInvalidateWidgetReason::Layout);
 	}
 	else
 	{
@@ -1802,98 +1802,107 @@ FReply SMergeUI::OnDetectPerforceConflicts()
 	{
 		*StatusMessage = FString::Printf(TEXT("Found %d conflicted Blueprint(s)"), ConflictCount);
 		
-		// Show dialog to select a conflicted Blueprint
 		FString SelectedBlueprint;
 		bool bBlueprintSelected = false;
-		
-		// Create options array for combo box
-		TArray<TSharedPtr<FString>> ConflictOptions;
-		for (const FString& BlueprintPath : ConflictedBlueprints)
-		{
-			ConflictOptions.Add(MakeShareable(new FString(BlueprintPath)));
-		}
-		TSharedPtr<FString> SelectedOption = ConflictOptions.Num() > 0 ? ConflictOptions[0] : nullptr;
-		
-		// Create a dialog window for selecting conflicted Blueprint
-		TSharedRef<SWindow> ConflictPickerWindow = SNew(SWindow)
-			.Title(FText::FromString(TEXT("Select Conflicted Blueprint")))
-			.ClientSize(FVector2D(600, 200))
-			.SupportsMaximize(false)
-			.SupportsMinimize(false);
 
-		TSharedRef<SVerticalBox> ConflictPickerContent = SNew(SVerticalBox)
-		
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.Padding(10)
-		[
-			SNew(STextBlock)
-			.Text(FText::FromString(FString::Printf(TEXT("Found %d conflicted Blueprint(s). Select one to merge:"), ConflictCount)))
-			.Font(FCoreStyle::GetDefaultFontStyle("Normal", 12))
-		]
-		
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.Padding(10)
-		[
-			SNew(STextComboBox)
-			.OptionsSource(&ConflictOptions)
-			.InitiallySelectedItem(SelectedOption)
-			.OnSelectionChanged_Lambda([&SelectedOption](TSharedPtr<FString> NewSelection, ESelectInfo::Type SelectInfo)
+		if (ConflictCount == 1)
+		{
+			// Single conflict: skip the picker and immediately start the workflow (fetch base/remote to temp, copy, load)
+			SelectedBlueprint = ConflictedBlueprints[0];
+			bBlueprintSelected = true;
+			UE_LOG(LogTemp, Log, TEXT("Single conflicted Blueprint detected, auto-selecting and starting load-from-Perforce workflow: %s"), *SelectedBlueprint);
+		}
+		else
+		{
+			// Multiple conflicts: show dialog to select which one to merge
+			TArray<TSharedPtr<FString>> ConflictOptions;
+			for (const FString& BlueprintPath : ConflictedBlueprints)
 			{
-				SelectedOption = NewSelection;
-			})
-		]
-		
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.Padding(10)
-		.HAlign(HAlign_Right)
-		[
-			SNew(SHorizontalBox)
+				ConflictOptions.Add(MakeShareable(new FString(BlueprintPath)));
+			}
+			TSharedPtr<FString> SelectedOption = ConflictOptions.Num() > 0 ? ConflictOptions[0] : nullptr;
 			
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(5, 0)
+			TSharedRef<SWindow> ConflictPickerWindow = SNew(SWindow)
+				.Title(FText::FromString(TEXT("Select Conflicted Blueprint")))
+				.ClientSize(FVector2D(600, 200))
+				.SupportsMaximize(false)
+				.SupportsMinimize(false);
+
+			TSharedRef<SVerticalBox> ConflictPickerContent = SNew(SVerticalBox)
+			
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(10)
 			[
-				SNew(SButton)
-				.Text(FText::FromString(TEXT("Cancel")))
-				.OnClicked_Lambda([ConflictPickerWindow]() -> FReply
+				SNew(STextBlock)
+				.Text(FText::FromString(FString::Printf(TEXT("Found %d conflicted Blueprint(s). Select one to merge:"), ConflictCount)))
+				.Font(FCoreStyle::GetDefaultFontStyle("Normal", 12))
+			]
+			
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(10)
+			[
+				SNew(STextComboBox)
+				.OptionsSource(&ConflictOptions)
+				.InitiallySelectedItem(SelectedOption)
+				.OnSelectionChanged_Lambda([&SelectedOption](TSharedPtr<FString> NewSelection, ESelectInfo::Type SelectInfo)
 				{
-					ConflictPickerWindow->RequestDestroyWindow();
-					return FReply::Handled();
+					SelectedOption = NewSelection;
 				})
 			]
 			
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(5, 0)
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(10)
+			.HAlign(HAlign_Right)
 			[
-				SNew(SButton)
-				.Text(FText::FromString(TEXT("Select")))
-				.OnClicked_Lambda([&SelectedBlueprint, &bBlueprintSelected, &SelectedOption, ConflictPickerWindow]() -> FReply
-				{
-					if (SelectedOption.IsValid() && SelectedOption->IsValid())
+				SNew(SHorizontalBox)
+				
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(5, 0)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("Cancel")))
+					.OnClicked_Lambda([ConflictPickerWindow]() -> FReply
 					{
-						SelectedBlueprint = **SelectedOption;
-						bBlueprintSelected = true;
-					}
-					ConflictPickerWindow->RequestDestroyWindow();
-					return FReply::Handled();
-				})
-			]
-		];
-		
-		ConflictPickerWindow->SetContent(ConflictPickerContent);
-		FSlateApplication::Get().AddModalWindow(ConflictPickerWindow, nullptr);
+						ConflictPickerWindow->RequestDestroyWindow();
+						return FReply::Handled();
+					})
+				]
+				
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(5, 0)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("Select & Load")))
+					.ToolTipText(FText::FromString(TEXT("Select this Blueprint and load BASE/REMOTE from Perforce (fetches to temp, then runs merge workflow)")))
+					.OnClicked_Lambda([&SelectedBlueprint, &bBlueprintSelected, &SelectedOption, ConflictPickerWindow]() -> FReply
+					{
+						if (SelectedOption.IsValid())
+						{
+							SelectedBlueprint = **SelectedOption;
+							bBlueprintSelected = true;
+						}
+						ConflictPickerWindow->RequestDestroyWindow();
+						return FReply::Handled();
+					})
+				]
+			];
+			
+			ConflictPickerWindow->SetContent(ConflictPickerContent);
+			FSlateApplication::Get().AddModalWindow(ConflictPickerWindow, nullptr);
+		}
 
 		if (bBlueprintSelected && !SelectedBlueprint.IsEmpty())
 		{
 			OnConflictedBlueprintSelected(SelectedBlueprint);
 			
-			// Automatically load all versions from Perforce after selection
-			// This makes the workflow smoother - user can go straight to "Perform Diff"
-			UE_LOG(LogTemp, Log, TEXT("Auto-loading versions for selected Blueprint: %s"), *SelectedBlueprint);
+			// Start the workflow: fetch BASE and REMOTE from Perforce to temp, copy to loadable path, load all versions
+			*StatusMessage = TEXT("Loading BASE and REMOTE from Perforce (temp)...");
+			UE_LOG(LogTemp, Log, TEXT("Starting load-from-Perforce workflow for: %s (fetch to temp, copy, load)"), *SelectedBlueprint);
 			OnLoadFromPerforce();
 		}
 		

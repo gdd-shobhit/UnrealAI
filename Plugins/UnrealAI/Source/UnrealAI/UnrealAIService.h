@@ -399,30 +399,6 @@ struct FBlueprintComponent
 };
 
 USTRUCT()
-struct FBlueprintConflict
-{
-	GENERATED_BODY()
-
-	UPROPERTY()
-	FString ConflictType;  // "NodeConflict", "VariableConflict", "FunctionConflict", "ConnectionConflict"
-
-	UPROPERTY()
-	FString ElementName;  // Name of the conflicting element
-
-	UPROPERTY()
-	FString BaseValue;  // Value in base version
-
-	UPROPERTY()
-	FString ModifiedValue;  // Value in modified version
-
-	UPROPERTY()
-	FString SuggestedResolution;  // AI suggestion for resolution
-
-	UPROPERTY()
-	float ConflictSeverity = 0.0f;  // 0.0 to 1.0, how severe the conflict is
-};
-
-USTRUCT()
 struct FBlueprintStructure
 {
 	GENERATED_BODY()
@@ -447,9 +423,6 @@ struct FBlueprintStructure
 
 	UPROPERTY()
 	TArray<FBlueprintGraphData> Graphs;
-
-	UPROPERTY()
-	TArray<FBlueprintConflict> Conflicts;
 
 	UPROPERTY()
 	TMap<FString, FString> BlueprintProperties;  // General Blueprint properties
@@ -726,9 +699,6 @@ private:
 	// UAsset Utility Functions
 	bool ExtractGUIDs(const FUAssetStructure& Structure, TArray<FGuid>& OutGUIDs);
 	bool PreserveGUIDs(const TArray<FGuid>& BaseGUIDs, const TArray<FGuid>& ModifiedGUIDs, TArray<FGuid>& OutMergedGUIDs);
-	bool ResolvePropertyConflicts(const FUAssetPropertyData& BaseProperty, const FUAssetPropertyData& ModifiedProperty, FUAssetPropertyData& OutResolvedProperty, const FString& AIGuidance);
-	bool ResolveExportConflict(const FExportEntry& BaseExport, const FExportEntry& ModifiedExport, FExportEntry& OutResolvedExport, const FString& AIGuidance);
-
 	// Blueprint-Specific Parsing and Analysis Functions
 
 	// Blueprint Structure Analysis
@@ -828,17 +798,8 @@ private:
 	bool MergeBlueprintVariables(const TArray<FBlueprintVariable>& BaseVariables, const TArray<FBlueprintVariable>& ModifiedVariables, TArray<FBlueprintVariable>& OutMergedVariables, FString& OutError);
 	bool MergeBlueprintFunctions(const TArray<FBlueprintFunction>& BaseFunctions, const TArray<FBlueprintFunction>& ModifiedFunctions, TArray<FBlueprintFunction>& OutMergedFunctions, FString& OutError);
 
-	// Conflict Detection and Resolution
-	bool DetectBlueprintConflicts(const FBlueprintStructure& BaseBlueprint, const FBlueprintStructure& ModifiedBlueprint, TArray<FBlueprintConflict>& OutConflicts, FString& OutError);
-	bool DetectNodeConflicts(const FBlueprintGraphData& BaseGraph, const FBlueprintGraphData& ModifiedGraph, TArray<FBlueprintConflict>& OutConflicts, FString& OutError);
-	bool DetectVariableConflicts(const TArray<FBlueprintVariable>& BaseVariables, const TArray<FBlueprintVariable>& ModifiedVariables, TArray<FBlueprintConflict>& OutConflicts, FString& OutError);
-	bool DetectFunctionConflicts(const TArray<FBlueprintFunction>& BaseFunctions, const TArray<FBlueprintFunction>& ModifiedFunctions, TArray<FBlueprintConflict>& OutConflicts, FString& OutError);
-	bool ResolveBlueprintConflict(const FBlueprintConflict& Conflict, const FString& AIGuidance, FString& OutResolvedValue, FString& OutError);
-
 	// AI-Powered Blueprint Analysis
 	FString BuildBlueprintAnalysisPrompt(const FBlueprintStructure& BlueprintStructure);
-	FString BuildBlueprintMergePrompt(const FBlueprintStructure& BaseBlueprint, const FBlueprintStructure& ModifiedBlueprint, const TArray<FBlueprintConflict>& Conflicts);
-	FString BuildBlueprintConflictResolutionPrompt(const FBlueprintConflict& Conflict, const FBlueprintStructure& BaseBlueprint, const FBlueprintStructure& ModifiedBlueprint);
 
 	// Blueprint Serialization
 	bool SerializeBlueprintStructure(const FBlueprintStructure& BlueprintStructure, FUAssetStructure& OutUAssetStructure, FString& OutError);

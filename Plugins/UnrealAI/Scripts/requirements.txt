@@ -1,0 +1,4 @@
+# UnrealAI MCP Bridge - run: pip install -r requirements.txt
+flask>=2.0
+openai>=1.0
+anthropic>=0.18

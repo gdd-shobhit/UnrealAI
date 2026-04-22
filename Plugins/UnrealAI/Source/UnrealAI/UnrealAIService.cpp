@@ -1298,12 +1298,27 @@ bool UUnrealAIService::ParseBlueprintJSON(const FString& JsonString, TMap<FStrin
 	CleanJsonString = CleanJsonString.Replace(TEXT("\r\n"), TEXT(" "));  // Remove Windows line endings
 	CleanJsonString = CleanJsonString.Replace(TEXT("\n"), TEXT(" "));  // Remove Unix line endings
 	CleanJsonString = CleanJsonString.Replace(TEXT("\t"), TEXT(" "));  // Remove tabs
+
+	// Normalize excessive spaces so we can reliably detect adjacent string tokens
+	while (CleanJsonString.Contains(TEXT("  ")))
+	{
+		CleanJsonString = CleanJsonString.Replace(TEXT("  "), TEXT(" "));
+	}
+
+	// Insert missing commas between adjacent string tokens inside arrays, e.g. "foo" "bar" -> "foo", "bar"
+	CleanJsonString = CleanJsonString.Replace(TEXT("\" \""), TEXT("\", \""));
+
+	// Remove stray pseudo-code tokens that are not valid JSON items
+	CleanJsonString = CleanJsonString.Replace(TEXT("\"End If\""), TEXT(""));
 	
 	// Fix common JSON syntax errors that are safe
 	CleanJsonString = CleanJsonString.Replace(TEXT("], }"), TEXT("] }"));  // Fix extra comma before closing brace
 	CleanJsonString = CleanJsonString.Replace(TEXT("},]"), TEXT("}]"));  // Fix extra comma before closing bracket
 	CleanJsonString = CleanJsonString.Replace(TEXT(", }"), TEXT(" }"));  // Fix comma before closing brace
 	CleanJsonString = CleanJsonString.Replace(TEXT(",]"), TEXT("]"));  // Fix comma before closing bracket
+	// Clean up possible commas left after removing tokens
+	CleanJsonString = CleanJsonString.Replace(TEXT(", }"), TEXT(" }"));
+	CleanJsonString = CleanJsonString.Replace(TEXT(", ]"), TEXT(" ]"));
 	
 	// No more space cleaning - prompt will generate clean JSON
 	
@@ -4320,29 +4335,11 @@ bool UUnrealAIService::ProcessUAssetMergeRequest(const FAIRequest& Request, FAIR
 			return false;
 		}
 		
-		// Detect conflicts
-		TArray<FBlueprintConflict> Conflicts;
-		if (!DetectBlueprintConflicts(BaseBlueprint, ModifiedBlueprint, Conflicts, Error))
-		{
-			UE_LOG(LogTemp, Warning, TEXT("Failed to detect Blueprint conflicts: %s"), *Error);
-			// Continue anyway, just log the warning
-		}
-		
-		// Analyze the Blueprints with AI
+		// Analyze the Blueprints with AI (non-conflict-aware merge)
 		FString Analysis = BuildBlueprintAnalysisPrompt(BaseBlueprint);
 		Analysis += TEXT("\n\n") + BuildBlueprintAnalysisPrompt(ModifiedBlueprint);
 		
-		if (!Conflicts.IsEmpty())
-		{
-			Analysis += TEXT("\n\nCONFLICTS DETECTED:\n");
-			for (const FBlueprintConflict& Conflict : Conflicts)
-			{
-				Analysis += FString::Printf(TEXT("- %s: %s (Base: %s, Modified: %s)\n"), 
-					*Conflict.ConflictType, *Conflict.ElementName, *Conflict.BaseValue, *Conflict.ModifiedValue);
-			}
-		}
-		
-		// Merge the Blueprints using AI
+		// Merge the Blueprints
 		FBlueprintStructure MergedBlueprint;
 		if (!MergeBlueprintStructures(BaseBlueprint, ModifiedBlueprint, MergedBlueprint, Error))
 		{
@@ -4379,9 +4376,9 @@ bool UUnrealAIService::ProcessUAssetMergeRequest(const FAIRequest& Request, FAIR
 		
 		// Update success message with Blueprint-specific details
 		OutResponse.bSuccess = true;
-		OutResponse.Content = FString::Printf(TEXT("Successfully merged Blueprint assets.\nBase: %s\nModified: %s\nOutput: %s\n\nBlueprint Details:\n- Variables: %d merged\n- Functions: %d merged\n- Graphs: %d merged\n- Conflicts Resolved: %d"), 
+		OutResponse.Content = FString::Printf(TEXT("Successfully merged Blueprint assets.\nBase: %s\nModified: %s\nOutput: %s\n\nBlueprint Details:\n- Variables: %d merged\n- Functions: %d merged\n- Graphs: %d merged"), 
 			*BaseAssetPath, *ModifiedAssetPath, *(OutputAssetPath.IsEmpty() ? ModifiedAssetPath : OutputAssetPath),
-			MergedBlueprint.Variables.Num(), MergedBlueprint.Functions.Num(), MergedBlueprint.Graphs.Num(), Conflicts.Num());
+			MergedBlueprint.Variables.Num(), MergedBlueprint.Functions.Num(), MergedBlueprint.Graphs.Num());
 	}
 	else
 	{
@@ -5061,12 +5058,8 @@ bool UUnrealAIService::MergeUAssetsWithAI(const FUAssetStructure& BaseStructure,
 		{
 			if (ExistingExport.ClassName == Export.ClassName)
 			{
-				// Conflict found - use AI guidance to resolve
-				FExportEntry ResolvedExport = ExistingExport;
-				if (ResolveExportConflict(ExistingExport, Export, ResolvedExport, MergeResponse.Content))
-				{
-					ExistingExport = ResolvedExport;
-				}
+				// Take modified version (non-conflict-aware merge)
+				ExistingExport = Export;
 				bFound = true;
 				break;
 			}
@@ -5085,12 +5078,8 @@ bool UUnrealAIService::MergeUAssetsWithAI(const FUAssetStructure& BaseStructure,
 		{
 			if (ExistingProperty.PropertyName == Property.PropertyName)
 			{
-				// Conflict found - use AI guidance to resolve
-				FUAssetPropertyData ResolvedProperty;
-				if (ResolvePropertyConflicts(ExistingProperty, Property, ResolvedProperty, MergeResponse.Content))
-				{
-					ExistingProperty = ResolvedProperty;
-				}
+				// Take modified version (non-conflict-aware merge)
+				ExistingProperty = Property;
 				bFound = true;
 				break;
 			}
@@ -5238,56 +5227,6 @@ bool UUnrealAIService::PreserveGUIDs(const TArray<FGuid>& BaseGUIDs, const TArra
 	
 	UE_LOG(LogTemp, Log, TEXT("Preserved %d GUIDs (Base: %d, Modified: %d, Merged: %d)"), 
 		OutMergedGUIDs.Num(), BaseGUIDs.Num(), ModifiedGUIDs.Num(), OutMergedGUIDs.Num());
-	return true;
-}
-
-bool UUnrealAIService::ResolvePropertyConflicts(const FUAssetPropertyData& BaseProperty, const FUAssetPropertyData& ModifiedProperty, FUAssetPropertyData& OutResolvedProperty, const FString& AIGuidance)
-{
-	// Default to modified property
-	OutResolvedProperty = ModifiedProperty;
-	
-	// Use AI guidance to make intelligent decisions
-	if (AIGuidance.Contains(TEXT("keep base")) && AIGuidance.Contains(BaseProperty.PropertyName))
-	{
-		OutResolvedProperty = BaseProperty;
-		UE_LOG(LogTemp, Log, TEXT("AI guidance: Keeping base property %s"), *BaseProperty.PropertyName);
-	}
-	else if (AIGuidance.Contains(TEXT("keep modified")) && AIGuidance.Contains(ModifiedProperty.PropertyName))
-	{
-		OutResolvedProperty = ModifiedProperty;
-		UE_LOG(LogTemp, Log, TEXT("AI guidance: Keeping modified property %s"), *ModifiedProperty.PropertyName);
-	}
-	else
-	{
-		// Default to modified property
-		UE_LOG(LogTemp, Log, TEXT("Default: Keeping modified property %s"), *ModifiedProperty.PropertyName);
-	}
-	
-	return true;
-}
-
-bool UUnrealAIService::ResolveExportConflict(const FExportEntry& BaseExport, const FExportEntry& ModifiedExport, FExportEntry& OutResolvedExport, const FString& AIGuidance)
-{
-	// Default to modified export
-	OutResolvedExport = ModifiedExport;
-	
-	// Use AI guidance to make intelligent decisions
-	if (AIGuidance.Contains(TEXT("keep base")) && AIGuidance.Contains(BaseExport.ClassName))
-	{
-		OutResolvedExport = BaseExport;
-		UE_LOG(LogTemp, Log, TEXT("AI guidance: Keeping base export %s"), *BaseExport.ClassName);
-	}
-	else if (AIGuidance.Contains(TEXT("keep modified")) && AIGuidance.Contains(ModifiedExport.ClassName))
-	{
-		OutResolvedExport = ModifiedExport;
-		UE_LOG(LogTemp, Log, TEXT("AI guidance: Keeping modified export %s"), *ModifiedExport.ClassName);
-	}
-	else
-	{
-		// Default to modified export
-		UE_LOG(LogTemp, Log, TEXT("Default: Keeping modified export %s"), *ModifiedExport.ClassName);
-	}
-	
 	return true;
 }
 
@@ -7692,129 +7631,6 @@ bool UUnrealAIService::MergeBlueprintFunctions(const TArray<FBlueprintFunction>&
 	return true;
 }
 
-// Conflict Detection Functions
-
-bool UUnrealAIService::DetectBlueprintConflicts(const FBlueprintStructure& BaseBlueprint, const FBlueprintStructure& ModifiedBlueprint, TArray<FBlueprintConflict>& OutConflicts, FString& OutError)
-{
-	UE_LOG(LogTemp, Log, TEXT("Detecting Blueprint conflicts"));
-	
-	// Detect variable conflicts
-	if (!DetectVariableConflicts(BaseBlueprint.Variables, ModifiedBlueprint.Variables, OutConflicts, OutError))
-	{
-		UE_LOG(LogTemp, Warning, TEXT("Failed to detect variable conflicts: %s"), *OutError);
-	}
-	
-	// Detect function conflicts
-	if (!DetectFunctionConflicts(BaseBlueprint.Functions, ModifiedBlueprint.Functions, OutConflicts, OutError))
-	{
-		UE_LOG(LogTemp, Warning, TEXT("Failed to detect function conflicts: %s"), *OutError);
-	}
-	
-	// Detect graph conflicts
-	for (const FBlueprintGraphData& BaseGraph : BaseBlueprint.Graphs)
-	{
-		for (const FBlueprintGraphData& ModifiedGraph : ModifiedBlueprint.Graphs)
-		{
-			if (BaseGraph.GraphName == ModifiedGraph.GraphName)
-			{
-				if (!DetectNodeConflicts(BaseGraph, ModifiedGraph, OutConflicts, OutError))
-				{
-					UE_LOG(LogTemp, Warning, TEXT("Failed to detect node conflicts in graph %s: %s"), *BaseGraph.GraphName, *OutError);
-				}
-				break;
-			}
-		}
-	}
-	
-	UE_LOG(LogTemp, Log, TEXT("Detected %d Blueprint conflicts"), OutConflicts.Num());
-	return true;
-}
-
-bool UUnrealAIService::DetectVariableConflicts(const TArray<FBlueprintVariable>& BaseVariables, const TArray<FBlueprintVariable>& ModifiedVariables, TArray<FBlueprintConflict>& OutConflicts, FString& OutError)
-{
-	for (const FBlueprintVariable& BaseVariable : BaseVariables)
-	{
-		for (const FBlueprintVariable& ModifiedVariable : ModifiedVariables)
-		{
-			if (BaseVariable.VariableName == ModifiedVariable.VariableName)
-			{
-				// Check for conflicts
-				if (BaseVariable.VariableType != ModifiedVariable.VariableType ||
-					BaseVariable.DefaultValue != ModifiedVariable.DefaultValue)
-				{
-					FBlueprintConflict Conflict;
-					Conflict.ConflictType = TEXT("VariableConflict");
-					Conflict.ElementName = BaseVariable.VariableName;
-					Conflict.BaseValue = FString::Printf(TEXT("%s = %s"), *BaseVariable.VariableType, *BaseVariable.DefaultValue);
-					Conflict.ModifiedValue = FString::Printf(TEXT("%s = %s"), *ModifiedVariable.VariableType, *ModifiedVariable.DefaultValue);
-					Conflict.ConflictSeverity = 0.7f;
-					
-					OutConflicts.Add(Conflict);
-				}
-				break;
-			}
-		}
-	}
-	
-	return true;
-}
-
-bool UUnrealAIService::DetectFunctionConflicts(const TArray<FBlueprintFunction>& BaseFunctions, const TArray<FBlueprintFunction>& ModifiedFunctions, TArray<FBlueprintConflict>& OutConflicts, FString& OutError)
-{
-	for (const FBlueprintFunction& BaseFunction : BaseFunctions)
-	{
-		for (const FBlueprintFunction& ModifiedFunction : ModifiedFunctions)
-		{
-			if (BaseFunction.FunctionName == ModifiedFunction.FunctionName)
-			{
-				// Check for conflicts in function logic
-				if (BaseFunction.FunctionGraph.ExecutionFlow.Num() != ModifiedFunction.FunctionGraph.ExecutionFlow.Num())
-				{
-					FBlueprintConflict Conflict;
-					Conflict.ConflictType = TEXT("FunctionConflict");
-					Conflict.ElementName = BaseFunction.FunctionName;
-					Conflict.BaseValue = FString::Printf(TEXT("%d execution steps"), BaseFunction.FunctionGraph.ExecutionFlow.Num());
-					Conflict.ModifiedValue = FString::Printf(TEXT("%d execution steps"), ModifiedFunction.FunctionGraph.ExecutionFlow.Num());
-					Conflict.ConflictSeverity = 0.8f;
-					
-					OutConflicts.Add(Conflict);
-				}
-				break;
-			}
-		}
-	}
-	
-	return true;
-}
-
-bool UUnrealAIService::DetectNodeConflicts(const FBlueprintGraphData& BaseGraph, const FBlueprintGraphData& ModifiedGraph, TArray<FBlueprintConflict>& OutConflicts, FString& OutError)
-{
-	for (const FBlueprintNode& BaseNode : BaseGraph.Nodes)
-	{
-		for (const FBlueprintNode& ModifiedNode : ModifiedGraph.Nodes)
-		{
-			if (BaseNode.NodeID == ModifiedNode.NodeID)
-			{
-				// Check for conflicts in node properties
-				if (BaseNode.Position != ModifiedNode.Position)
-				{
-					FBlueprintConflict Conflict;
-					Conflict.ConflictType = TEXT("NodeConflict");
-					Conflict.ElementName = BaseNode.NodeName;
-					Conflict.BaseValue = FString::Printf(TEXT("Position: %s"), *BaseNode.Position.ToString());
-					Conflict.ModifiedValue = FString::Printf(TEXT("Position: %s"), *ModifiedNode.Position.ToString());
-					Conflict.ConflictSeverity = 0.3f; // Low severity for position changes
-					
-					OutConflicts.Add(Conflict);
-				}
-				break;
-			}
-		}
-	}
-	
-	return true;
-}
-
 // AI-Powered Analysis Functions
 
 FString UUnrealAIService::BuildBlueprintAnalysisPrompt(const FBlueprintStructure& BlueprintStructure)
@@ -7879,67 +7695,6 @@ FString UUnrealAIService::BuildBlueprintAnalysisPrompt(const FBlueprintStructure
 	Prompt += TEXT("4. Component architecture\n");
 	Prompt += TEXT("5. Potential merge conflicts\n");
 	Prompt += TEXT("6. GUID preservation requirements\n");
-	
-	return Prompt;
-}
-
-FString UUnrealAIService::BuildBlueprintMergePrompt(const FBlueprintStructure& BaseBlueprint, const FBlueprintStructure& ModifiedBlueprint, const TArray<FBlueprintConflict>& Conflicts)
-{
-	FString Prompt = TEXT("You are an expert Unreal Engine Blueprint merger. Provide guidance for merging these Blueprint structures:\n\n");
-	
-	Prompt += TEXT("Base Blueprint:\n");
-	Prompt += FString::Printf(TEXT("- Name: %s\n"), *BaseBlueprint.BlueprintName);
-	Prompt += FString::Printf(TEXT("- Variables: %d, Functions: %d, Graphs: %d\n"), 
-		BaseBlueprint.Variables.Num(), BaseBlueprint.Functions.Num(), BaseBlueprint.Graphs.Num());
-	
-	Prompt += TEXT("Modified Blueprint:\n");
-	Prompt += FString::Printf(TEXT("- Name: %s\n"), *ModifiedBlueprint.BlueprintName);
-	Prompt += FString::Printf(TEXT("- Variables: %d, Functions: %d, Graphs: %d\n"), 
-		ModifiedBlueprint.Variables.Num(), ModifiedBlueprint.Functions.Num(), ModifiedBlueprint.Graphs.Num());
-	
-	if (!Conflicts.IsEmpty())
-	{
-		Prompt += TEXT("\nCONFLICTS DETECTED:\n");
-		for (const FBlueprintConflict& Conflict : Conflicts)
-		{
-			Prompt += FString::Printf(TEXT("- %s: %s (Severity: %.1f)\n"), 
-				*Conflict.ConflictType, *Conflict.ElementName, Conflict.ConflictSeverity);
-			Prompt += FString::Printf(TEXT("  Base: %s\n"), *Conflict.BaseValue);
-			Prompt += FString::Printf(TEXT("  Modified: %s\n"), *Conflict.ModifiedValue);
-		}
-	}
-	
-	Prompt += TEXT("\nProvide merge guidance:\n");
-	Prompt += TEXT("1. Which variables to keep from each Blueprint\n");
-	Prompt += TEXT("2. How to resolve function conflicts\n");
-	Prompt += TEXT("3. How to merge execution flows\n");
-	Prompt += TEXT("4. Which GUIDs to preserve\n");
-	Prompt += TEXT("5. How to handle new vs. modified content\n");
-	Prompt += TEXT("6. Any special considerations for this Blueprint type\n");
-	
-	return Prompt;
-}
-
-FString UUnrealAIService::BuildBlueprintConflictResolutionPrompt(const FBlueprintConflict& Conflict, const FBlueprintStructure& BaseBlueprint, const FBlueprintStructure& ModifiedBlueprint)
-{
-	FString Prompt = TEXT("You are an expert Unreal Engine Blueprint conflict resolver. Provide guidance for resolving this specific conflict:\n\n");
-	
-	Prompt += FString::Printf(TEXT("Conflict Type: %s\n"), *Conflict.ConflictType);
-	Prompt += FString::Printf(TEXT("Element: %s\n"), *Conflict.ElementName);
-	Prompt += FString::Printf(TEXT("Severity: %.1f\n\n"), Conflict.ConflictSeverity);
-	
-	Prompt += FString::Printf(TEXT("Base Value: %s\n"), *Conflict.BaseValue);
-	Prompt += FString::Printf(TEXT("Modified Value: %s\n\n"), *Conflict.ModifiedValue);
-	
-	Prompt += TEXT("Context:\n");
-	Prompt += FString::Printf(TEXT("Base Blueprint: %s\n"), *BaseBlueprint.BlueprintName);
-	Prompt += FString::Printf(TEXT("Modified Blueprint: %s\n\n"), *ModifiedBlueprint.BlueprintName);
-	
-	Prompt += TEXT("Provide specific resolution guidance:\n");
-	Prompt += TEXT("1. Which value should be kept and why\n");
-	Prompt += TEXT("2. How to combine both values if possible\n");
-	Prompt += TEXT("3. What impact this choice will have\n");
-	Prompt += TEXT("4. Any additional considerations\n");
 	
 	return Prompt;
 }
@@ -8203,26 +7958,6 @@ bool UUnrealAIService::ExtractNodePins(const TArray<uint8>& PinData, TArray<FBlu
 	Pin.PinType = TEXT("Exec");
 	Pin.Direction = TEXT("Input");
 	OutPins.Add(Pin);
-	
-	return true;
-}
-
-bool UUnrealAIService::ResolveBlueprintConflict(const FBlueprintConflict& Conflict, const FString& AIGuidance, FString& OutResolvedValue, FString& OutError)
-{
-	// Use AI guidance to resolve conflicts
-	if (AIGuidance.Contains(TEXT("keep base")))
-	{
-		OutResolvedValue = Conflict.BaseValue;
-	}
-	else if (AIGuidance.Contains(TEXT("keep modified")))
-	{
-		OutResolvedValue = Conflict.ModifiedValue;
-	}
-	else
-	{
-		// Default to modified value
-		OutResolvedValue = Conflict.ModifiedValue;
-	}
 	
 	return true;
 }

@@ -22,8 +22,6 @@ private:
 private:
 	TSharedPtr<class FUICommandList> PluginCommands;
 	
-	// UI Options
-	TArray<TSharedPtr<FString>> RequestTypeOptions;
+	// UI Options (Provider used by minimal UI)
 	TArray<TSharedPtr<FString>> ProviderOptions;
-	TArray<TSharedPtr<FString>> BlueprintOptions;
 };

@@ -4,7 +4,12 @@
 #include "Serialization/JsonWriter.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
-
+#include "Kismet2/Kismet2NameValidators.h"
+#include "Kismet/KismetSystemLibrary.h"
+#include <K2Node_VariableGet.h>
+#include <K2Node_VariableSet.h>
+#include "K2Node_CallFunction.h"
+#include "EdGraphSchema_K2_Actions.h"
 
 FBlueprintJsonParser::FBlueprintJsonParser()
 {
@@ -77,8 +82,8 @@ static bool ParsePinTypeFromJson(const TSharedPtr<FJsonObject>& jsonObj, FEdGrap
         outPinType.PinCategory = UEdGraphSchema_K2::PC_String;
     else if (category.Equals(TEXT("Bool"), ESearchCase::IgnoreCase))
         outPinType.PinCategory = UEdGraphSchema_K2::PC_Boolean;
-    else if (category.Equals(TEXT("Vector"), ESearchCase::IgnoreCase))
-        outPinType.PinCategory = UEdGraphSchema_K2::PC_Struct, outPinType.PinSubCategory = UEdGraphSchema_K2::PC_Struct.ToString(); // fallback, will set object below
+    //else if (category.Equals(TEXT("Vector"), ESearchCase::IgnoreCase))
+        //outPinType.PinCategory = UEdGraphSchema_K2::PC_Struct, outPinType.PinSubCategory = UEdGraphSchema_K2::PC_Struct.ToString(); // fallback, will set object below
     else if (category.Equals(TEXT("Object"), ESearchCase::IgnoreCase))
         outPinType.PinCategory = UEdGraphSchema_K2::PC_Object;
     else if (category.Equals(TEXT("Struct"), ESearchCase::IgnoreCase))
@@ -106,7 +111,7 @@ static bool ParsePinTypeFromJson(const TSharedPtr<FJsonObject>& jsonObj, FEdGrap
         {
             // If path failed, try to find by class name only
             FString className = FPackageName::ObjectPathToObjectName(subObjPath);
-            UClass* foundClass = FindObject<UClass>(ANY_PACKAGE, *className);
+            UClass* foundClass = FindObject<UClass>(nullptr, *className);
             if (foundClass)
             {
                 outPinType.PinSubCategoryObject = foundClass;
@@ -177,7 +182,8 @@ bool FBlueprintJsonParser::ParseFunctionGraphDescriptorFromJson(const FString& j
             FEdGraphPinType pinType;
             if (ParsePinTypeFromJson(varObj, pinType))
             {
-                outDesc.variables.Add(TPair<FName, FEdGraphPinType>(TEXT("Test_%s", pinType), pinType));
+                // Use a generic name for now; JSON can optionally provide a better name
+                outDesc.variables.Add(TPair<FName, FEdGraphPinType>(FName(TEXT("Var")), pinType));
             }
         }
     }
@@ -446,8 +452,8 @@ bool FBlueprintJsonParser::AddVariablesToBlueprint(UBlueprint* blueprint, const 
 	for (int32 i = 0; i < variables.Num(); ++i)
 	{
 		const FEdGraphPinType& varType = variables[i].Value;
-		// Create a stable but readable name — you can change this policy
-		FName varName = *FString::Printf(variables[i].Key);
+		// Use provided variable name directly
+		FName varName = variables[i].Key;
 		if (!FBlueprintEditorUtils::AddMemberVariable(blueprint, varName, varType))
 		{
 			UE_LOG(LogTemp, Warning, TEXT("Failed to add member variable %s"), *varName.ToString());
@@ -474,7 +480,7 @@ bool FBlueprintJsonParser::CreateNodesFromDescriptors(UEdGraph* functionGraph, c
 			{
 				// fallback to find UClass by name (strip package prefix)
 				FString className = FPackageName::ObjectPathToObjectName(desc.nodeClassPath);
-				nodeClass = FindObject<UClass>(ANY_PACKAGE, *className);
+				nodeClass = FindObject<UClass>(nullptr, *className);
 			}
 		}
 
@@ -539,8 +545,8 @@ bool FBlueprintJsonParser::ConnectNodesFromDescriptor(UEdGraph* functionGraph, c
 
 	for (const FNodeConnection& conn : connections)
 	{
-		const UEdGraphNode** fromNodePtr = guidToNodeMap.Find(conn.from.nodeId);
-		const UEdGraphNode** toNodePtr = guidToNodeMap.Find(conn.to.nodeId);
+		UEdGraphNode** fromNodePtr = guidToNodeMap.Find(conn.from.nodeId);
+		UEdGraphNode** toNodePtr = guidToNodeMap.Find(conn.to.nodeId);
 
 		if (!fromNodePtr || !toNodePtr)
 		{
@@ -549,8 +555,8 @@ bool FBlueprintJsonParser::ConnectNodesFromDescriptor(UEdGraph* functionGraph, c
 			continue;
 		}
 
-		UEdGraphNode* fromNode = const_cast<UEdGraphNode*>(*fromNodePtr);
-		UEdGraphNode* toNode = const_cast<UEdGraphNode*>(*toNodePtr);
+		UEdGraphNode* fromNode = *fromNodePtr;
+		UEdGraphNode* toNode = *toNodePtr;
 
 		// Resolve pins
 		UEdGraphPin* outPin = ResolvePinByNameOrType(fromNode, conn.from, nullptr);
@@ -805,8 +811,8 @@ FBlueprintInfo FBlueprintJsonParser::ExtractBlueprintInfo(UBlueprint* blueprint)
 			Info.functions.Add(Graph->GetFName().ToString());
 		}
 
-		//AddFunctionToBlueprint(blueprint, "TestFunction");
-		//FBlueprintJsonParser::AddBlueprintFunctionFromDescriptor(blueprint, myGraphDescriptor);
+		//AddFunctionToBlueprint(blueprint, "TestFunction",);
+		TestAddFunction(blueprint);
 		// 6. Mark Blueprint dirty + recompile
 		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(blueprint);
 		FKismetEditorUtilities::CompileBlueprint(blueprint);
@@ -838,7 +844,7 @@ void FBlueprintJsonParser::AddFunctionToBlueprint(UBlueprint* blueprint,
 	// 2. Add variables
 	for (const TPair<FName, FEdGraphPinType>& var : variables)
 	{
-		FName varName = *FString::Printf(var.Key);
+		FName varName = var.Key;
 		FBlueprintEditorUtils::AddMemberVariable(blueprint, varName, var.Value);
 	}
 
@@ -880,11 +886,43 @@ void FBlueprintJsonParser::AddFunctionToBlueprint(UBlueprint* blueprint,
 	{
 		if (!*nodeClass) continue;
 
+
 		UEdGraphNode* newNode = NewObject<UEdGraphNode>(functionToAdd, nodeClass);
+
 		newNode->CreateNewGuid();
 		newNode->PostPlacedNewNode();
 		newNode->AllocateDefaultPins();
 		functionToAdd->AddNode(newNode, false, false);
+
+		// --- Special handling ---
+		if (UK2Node_CallFunction* callFunc = Cast<UK2Node_CallFunction>(newNode))
+		{
+			// Example: bind to PrintString by default
+			static FName funcName = GET_FUNCTION_NAME_CHECKED(UKismetSystemLibrary, PrintString);
+			UFunction* func = UKismetSystemLibrary::StaticClass()->FindFunctionByName(funcName);
+			if (func)
+			{
+				callFunc->SetFromFunction(func);
+				// Rebuild pins AFTER binding function
+				callFunc->AllocateDefaultPins();
+				callFunc->ReconstructNode();
+			}
+		}
+		else if (UK2Node_VariableGet* varGet = Cast<UK2Node_VariableGet>(newNode))
+		{
+			// Example: bind to first variable if exists
+			if (variables.Num() > 0)
+			{
+				varGet->VariableReference.SetSelfMember(variables[0].Key);
+			}
+		}
+		else if (UK2Node_VariableSet* varSet = Cast<UK2Node_VariableSet>(newNode))
+		{
+			if (variables.Num() > 0)
+			{
+				varSet->VariableReference.SetSelfMember(variables[0].Key);
+			}
+		}
 
 		createdNodes.Add(newNode);
 	}
@@ -892,6 +930,18 @@ void FBlueprintJsonParser::AddFunctionToBlueprint(UBlueprint* blueprint,
 	// Add entry & result for indexing
 	createdNodes.Insert(entryNode, 0);
 	createdNodes.Add(ResultNode);
+
+	UK2Node_VariableGet* getNode = FEdGraphSchemaAction_K2NewNode::SpawnNode<UK2Node_VariableGet>(
+		functionToAdd,
+		FVector2D(200, 200), // Node position in editor
+		EK2NewNodeFlags::None,
+		[&](UK2Node_VariableGet* NewInstance)
+	{
+		// Set which variable it should represent
+		NewInstance->VariableReference.SetSelfMember(variables[0].Key);
+	});
+
+	createdNodes.Add(getNode);
 
 	// 5. Connect execution pins (Entry → Result)
 	ConnectNodes(createdNodes, connections);
@@ -955,6 +1005,37 @@ TSharedPtr<FJsonObject> FBlueprintJsonParser::BlueprintInfoToJson(const FBluepri
 	JsonObject->SetArrayField(TEXT("functions"), FunctionsArray);
 
 	return JsonObject;
+}
+
+void FBlueprintJsonParser::TestAddFunction(UBlueprint* blueprint)
+{
+	// Function name
+	FName functionName("RollDice");
+
+	// Variables (example: one Int variable)
+	TArray<TPair<FName, FEdGraphPinType>> variables;
+	{
+		FEdGraphPinType intPinType;
+		intPinType.PinCategory = UEdGraphSchema_K2::PC_Int;
+		variables.Add(TPair<FName, FEdGraphPinType>(FName("TestInt"), intPinType));
+	}
+
+	// Nodes to spawn
+	TArray<TSubclassOf<UEdGraphNode>> nodeClasses;
+	nodeClasses.Add(UK2Node_CallFunction::StaticClass()); // PrintString
+
+	// Connections (indices in createdNodes array)
+	// Index mapping after your implementation:
+	//   0 = Entry
+	//   1 = PrintString
+	//   2 = Result
+	TArray<TPair<int32, int32>> connections;
+	connections.Add(TPair<int32, int32>(0, 1)); // Entry → PrintString
+	connections.Add(TPair<int32, int32>(1, 2)); // PrintString → Result
+
+	// Call your function
+	FBlueprintJsonParser parser;
+	parser.AddFunctionToBlueprint(blueprint, functionName, nodeClasses, connections, variables);
 }
 
 void FBlueprintJsonParser::LogJsonObject(const TSharedPtr<FJsonObject>& JsonObject)
